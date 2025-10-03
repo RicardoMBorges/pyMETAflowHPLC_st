@@ -23,4 +23,4 @@ seaborn>=0.13
 mpld3>=0.5
 
 # Alignment (optional; app guards absence)
-pyicoshift>=0.3
+pyicoshift
