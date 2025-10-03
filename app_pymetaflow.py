@@ -87,7 +87,7 @@ st.markdown(
     Check also: [TLC2Chrom](https://tlc2chrom.streamlit.app/)
     """
 )
-st.sidebar.markdown("""---""")
+#st.sidebar.markdown("""---""")
 # PayPal donate button
 st.sidebar.markdown("""
 <hr>
