@@ -73,47 +73,133 @@ try:
 except Exception:
     HAVE_TENSORLY = False
 
-# =============================================================================
-# Optional lib: pyicoshift (graceful fallback)
-# =============================================================================
-HAVE_PYICOSHIFT = True
-ICOSHF_CALLABLE = None
 
+# =============================================================================
+# Optional lib: pyicoshift (graceful fallback, robust wrapper)
+# =============================================================================
+import numpy as np
+
+HAVE_PYICOSHIFT = False
+ICOSHF_CALLABLE = None  # will become a callable(X, segments=<int>, reference=<1d array|int|None>) -> aligned X
+
+# ---- call helper: try common kw aliases then positional ----
+def _call_with_param_aliases(func_or_method, X, segments, reference):
+    tries = [
+        dict(segments=segments, reference=reference),
+        dict(n_intervals=segments, reference=reference),
+        dict(intervals=segments, reference=reference),
+        dict(nSegments=segments, reference=reference),
+        dict(segments=segments, target=reference),
+        dict(n_intervals=segments, target=reference),
+        dict(intervals=segments, target=reference),
+        dict(nSegments=segments, target=reference),
+    ]
+    last_err = None
+    for kwargs in tries:
+        try:
+            return func_or_method(X, **kwargs)
+        except TypeError as e:
+            last_err = e
+            continue
+    try:
+        return func_or_method(X, segments, reference)
+    except Exception as e:
+        raise TypeError(
+            f"ICOSHF backend rejected all calling conventions. Last error: {e}"
+        ) from (last_err or e)
+
+# ---- backend normalizer: class | instance | function -> unified callable ----
+def _normalize_icoshift_backend(backend):
+    try:
+        obj = backend() if isinstance(backend, type) else backend
+    except TypeError:
+        obj = backend  # not instantiable → treat as bare function
+
+    def _runner(X, segments=None, reference=None):
+        # preference order
+        if hasattr(obj, "align") and callable(getattr(obj, "align")):
+            return _call_with_param_aliases(obj.align, X, segments, reference)
+        if hasattr(obj, "fit_transform") and callable(getattr(obj, "fit_transform")):
+            return _call_with_param_aliases(obj.fit_transform, X, segments, reference)
+        if callable(obj):
+            return _call_with_param_aliases(obj, X, segments, reference)
+        raise TypeError("Unsupported ICOSHIFT backend: no align/fit_transform/callable interface.")
+    return _runner
+
+# ---- try to import pyicoshift in either form, but ALWAYS wrap via normalizer ----
 try:
-    # Common API: function form
-    from pyicoshift import icoshift as _icoshift_fn  # type: ignore
-    ICOSHF_CALLABLE = _icoshift_fn
+    from pyicoshift import icoshift as _ico_fn  # function API
+    ICOSHF_CALLABLE = _normalize_icoshift_backend(_ico_fn)
+    HAVE_PYICOSHIFT = True
 except Exception:
     try:
-        # Alternate API: class form
-        from pyicoshift import Icoshift as _IcoshiftCls  # type: ignore
-
-        def _icoshift_from_cls(*args, **kwargs):
-            obj = _IcoshiftCls(*args, **kwargs)
-            return obj.run() if hasattr(obj, "run") else obj
-
-        ICOSHF_CALLABLE = _icoshift_from_cls
+        from pyicoshift import Icoshift as _IcoshiftCls  # class API
+        ICOSHF_CALLABLE = _normalize_icoshift_backend(_IcoshiftCls)
+        HAVE_PYICOSHIFT = True
     except Exception:
         HAVE_PYICOSHIFT = False
         ICOSHF_CALLABLE = None
 
-# Helper that safely calls Icoshift or raises a clear error
-def align_with_icoshift(matrix_2d: np.ndarray,
-                        segments: int | None = None,
-                        reference: int | str | None = 0):
+# ---- public helper: safe alignment call ----
+def align_samples_using_icoshift(df, n_intervals=20, target=None):
     """
-    Align spectra using pyicoshift if available.
-    - matrix_2d shape: (n_samples, n_points)
-    - segments: number of segments for icoshift
-    - reference: sample index or 'maxcorr'
+    df: DataFrame with columns: RT(min), sample1, sample2, ...
+    Returns DataFrame with same columns, aligned (RT unchanged; intensities shifted).
     """
+    if df is None or df.shape[1] <= 1:
+        raise ValueError("Need a matrix with at least one sample column.")
+    if n_intervals is None or int(n_intervals) < 1:
+        raise ValueError("n_intervals must be a positive integer.")
     if not HAVE_PYICOSHIFT or ICOSHF_CALLABLE is None:
-        raise ImportError("pyicoshift is not installed. Install 'pyicoshift>=0.3' or use another aligner.")
+        raise RuntimeError("Icoshift backend not available. Install 'pyicoshift' in this environment.")
+
+    rt = df["RT(min)"].to_numpy(dtype=float)
+    sample_cols = [c for c in df.columns if c != "RT(min)"]
+    X = np.vstack([df[c].to_numpy(dtype=float) for c in sample_cols])
+
+    # NaN-safe
+    if np.isnan(X).any():
+        X = np.nan_to_num(X, nan=0.0)
+
+    # reference spectrum
+    if isinstance(target, str):
+        t = target.lower()
+        if t == "median":
+            ref = np.median(X, axis=0)
+        elif t == "mean":
+            ref = np.mean(X, axis=0)
+        else:
+            raise ValueError(f"Unknown target='{target}'. Use 'median', 'mean', an int index, or a 1D array.")
+    elif isinstance(target, (int, np.integer)):
+        if target < 0 or target >= X.shape[0]:
+            raise IndexError(f"target index {target} out of range (0..{X.shape[0]-1}).")
+        ref = X[int(target), :]
+    elif target is None:
+        ref = np.median(X, axis=0)
+    else:
+        ref = np.asarray(target, dtype=float)
+        if ref.ndim != 1 or ref.shape[0] != X.shape[1]:
+            raise ValueError("Provided reference must be 1D and match number of RT points.")
+
+    # call backend (some libs return (aligned, shifts) → keep first)
     try:
-        return ICOSHF_CALLABLE(matrix_2d, segments=segments, reference=reference)
-    except TypeError:
-        # Some builds use different kw names; retry minimal
-        return ICOSHF_CALLABLE(matrix_2d, segments=segments)
+        out = ICOSHF_CALLABLE(X, segments=int(n_intervals), reference=ref)
+        X_aligned = out[0] if (isinstance(out, (tuple, list)) and len(out) > 0) else out
+    except Exception as e:
+        raise RuntimeError(
+            f"Icoshift failed. X={X.shape}, segments={int(n_intervals)}, ref={ref.shape if hasattr(ref,'shape') else 'scalar'}; "
+            f"backend={type(ICOSHF_CALLABLE)}; error={type(e).__name__}: {e}"
+        ) from e
+
+    if X_aligned.shape != X.shape:
+        raise RuntimeError(f"Icoshift returned shape {X_aligned.shape}, expected {X.shape}.")
+
+    out_df = df.copy()
+    for i, c in enumerate(sample_cols):
+        out_df[c] = X_aligned[i, :]
+    return out_df
+
+
 
 # =============================================================================
 # Encoding detection (chardet / charset-normalizer / robust fallbacks)
@@ -229,8 +315,6 @@ def process_txt_files(input_folder):
             # Save the DataFrame as a CSV file. Floats will be saved with the standard '.' as the decimal separator.
             df.to_csv(output_path, index=False)
             #print(f"Processed and saved: {output_path}")
-
-
 
 def combine_csv_files(data_folder, output_csv=None):
     """

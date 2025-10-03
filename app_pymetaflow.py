@@ -87,7 +87,7 @@ st.markdown(
     Check also: [TLC2Chrom](https://tlc2chrom.streamlit.app/)
     """
 )
-#st.sidebar.markdown("""---""")
+
 # PayPal donate button
 st.sidebar.markdown("""
 <hr>
@@ -98,10 +98,10 @@ st.sidebar.markdown("""
 </a>
 </center>
 """, unsafe_allow_html=True)
+
 st.sidebar.markdown("""---""")
 
 TUTORIAL_URL = "https://github.com/RicardoMBorges/Gradient_verification_for_HPLC/blob/main/READme_Streamlit.md"
-# Put it wherever you want (main area):
 try:
     st.sidebar.link_button("📘 Tutorial", TUTORIAL_URL)
 except Exception:
@@ -112,8 +112,8 @@ except Exception:
         unsafe_allow_html=True,
     )
 
+
 MockData_URL = "https://github.com/RicardoMBorges/Gradient_verification_for_HPLC/blob/main/READme_Streamlit.md"
-# Put it wherever you want (main area):
 try:
     st.sidebar.link_button("Mock Data", MockData_URL)
 except Exception:
@@ -123,10 +123,9 @@ except Exception:
         '</a>',
         unsafe_allow_html=True,
     )
-
 st.sidebar.markdown("""---""")
-
 # ================== INPUTS & PARSING (ORDERED) ==================
+
 # ---- 1) Upload Chromatograms (.txt) ----
 st.sidebar.header("1) Upload chromatograms (.txt)")
 mode = st.sidebar.radio(
