@@ -112,39 +112,34 @@ except Exception:
         unsafe_allow_html=True,
     )
 
+MockData_URL = "https://github.com/RicardoMBorges/Gradient_verification_for_HPLC/blob/main/READme_Streamlit.md"
 
+# Put it wherever you want (main area):
+try:
+    st.sidebar.link_button("Mock Data", MockData_URL)
+except Exception:
+    st.sidebar.markdown(
+        f'<a href="{MockData_URL}" target="_blank">'
+        '<button style="padding:0.6rem 1rem; border-radius:8px; border:1px solid #ddd; cursor:pointer;">Mock Data</button>'
+        '</a>',
+        unsafe_allow_html=True,
+    )
+
+# ================== INPUTS & PARSING (ORDERED) ==================
+
+# ---- 1) Upload Chromatograms (.txt) ----
 st.sidebar.header("1) Upload chromatograms (.txt)")
-uploads = st.sidebar.file_uploader(
-    "ASCII export(s) with 'R.Time (min)\\tIntensity' header",
-    type=["txt"],
-    accept_multiple_files=True
+mode = st.sidebar.radio(
+    "Input mode",
+    ["2D LabSolutions ASCII (uploads)", "3D PDA (folder of .txt)", "3D PDA (uploaded .txt)"],
+    index=0,
 )
 
-st.sidebar.header("2) Optional: Upload metadata (.csv)")
-meta_file = st.sidebar.file_uploader("Metadata CSV (semicolon ';' as delimiter)", type=["csv", "txt"])
-
-st.sidebar.header("3) Optional: Upload bioactivity (.csv)")
-bio_file = st.sidebar.file_uploader("Bioactivity CSV", type=["csv"])
-
-st.sidebar.header("Display preferences")
-use_static_table = st.sidebar.checkbox("Use static table (avoid PyArrow)", value=True)
-
-def show_df(df: pd.DataFrame):
-    """Safely display a DataFrame without requiring PyArrow."""
-    if (not use_static_table) and PYARROW_AVAILABLE:
-        st.dataframe(df, use_container_width=True)
-    else:
-        try:
-            html = df.to_html(index=False)
-            st.markdown(html, unsafe_allow_html=True)
-        except Exception:
-            st.text(df.to_string(index=False))
-
-# ------------------ Parsing helpers ------------------
+# ------------------ Helpers ------------------
 HEADER_RE = re.compile(r"^R\.Time \(min\)\s+Intensity\s*$", flags=re.MULTILINE)
 
 def parse_labsolutions_ascii(file_name: str, raw_bytes: bytes) -> pd.DataFrame:
-    """Return DF with columns: ['RT(min)', <sample_name>] parsed from LabSolutions ASCII .txt."""
+    """Return DF with columns: ['RT(min)', <sample_name>] parsed from LabSolutions ASCII .txt (2D)."""
     try:
         text = raw_bytes.decode("latin1", errors="ignore")
     except Exception:
@@ -170,7 +165,20 @@ def outer_join_rt(dfs: dict) -> pd.DataFrame:
         combined = combined.sort_values("RT(min)").reset_index(drop=True)
     return combined
 
-# ------------------ Preprocessing ------------------
+# Display helper that reads preference from session_state so we can call it before step 4 renders
+def show_df(df: pd.DataFrame):
+    """Safely display a DataFrame without requiring PyArrow."""
+    use_static = st.session_state.get("use_static_table", True)
+    if (not use_static) and PYARROW_AVAILABLE:
+        st.dataframe(df, use_container_width=True)
+    else:
+        try:
+            html = df.to_html(index=False)
+            st.markdown(html, unsafe_allow_html=True)
+        except Exception:
+            st.text(df.to_string(index=False))
+
+# ------------------ Preprocessing helpers (unchanged) ------------------
 def resample_to_grid(df: pd.DataFrame, step: float, rt_min=None, rt_max=None):
     if df is None:
         return None, None
@@ -242,25 +250,94 @@ def matrix_to_XY(df_grid: pd.DataFrame, sample_order: list) -> tuple:
     feats = [f"{rt:.4f}" for rt in df_grid["RT(min)"].values]
     return X, feats
 
-# ------------------ Parse uploads ------------------
-parsed = {}
-report_rows = []
-if uploads:
-    for f in uploads:
+# ------------------ Build 'combined' by selected mode ------------------
+combined = None
+
+if mode == "2D LabSolutions ASCII (uploads)":
+    uploads_2d = st.sidebar.file_uploader(
+        "ASCII export(s) with 'R.Time (min)\\tIntensity' header",
+        type=["txt"], accept_multiple_files=True
+    )
+    parsed = {}
+    report_rows = []
+    if uploads_2d:
+        for f in uploads_2d:
+            try:
+                raw = f.getvalue()  # robust even if read elsewhere
+                df = parse_labsolutions_ascii(f.name, raw)
+                parsed[f.name] = df
+                report_rows.append({"file": f.name, "status": "parsed", "rows": len(df)})
+            except Exception as e:
+                report_rows.append({"file": f.name, "status": f"error: {e}", "rows": 0})
+    report_df = pd.DataFrame(report_rows)
+    if not report_df.empty:
+        st.subheader("Parsing report")
+        show_df(report_df)
+    combined = outer_join_rt(parsed) if parsed else None
+
+elif mode == "3D PDA (folder of .txt)":
+    st.sidebar.markdown("Pick wavelength and a local folder of PDA ASCII files.")
+    wl_pick = st.sidebar.number_input("Target wavelength (nm)", value=320.0, step=1.0)
+    input_folder = st.sidebar.text_input("Local folder path with .txt files")
+    if st.sidebar.button("Extract traces at wavelength"):
+        if input_folder and os.path.isdir(input_folder):
+            combined_3d = dp.import_3D_data(
+                input_folder, target_wavelength=float(wl_pick),
+                output_filename=f"combined_{int(wl_pick)}nm.csv"
+            )
+            if combined_3d is None or combined_3d.empty:
+                st.error("No data combined from the folder.")
+            else:
+                st.success(f"Built matrix from {combined_3d.shape[1]-1} files at ≈{wl_pick} nm")
+                show_df(combined_3d.head(10))
+                combined = combined_3d
+        else:
+            st.error("Please enter a valid existing folder path.")
+
+elif mode == "3D PDA (uploaded .txt)":
+    uploads_pda = st.sidebar.file_uploader(
+        "PDA ASCII .txt exports (multi-wavelength 3D tables)",
+        type=["txt"], accept_multiple_files=True
+    )
+    wl_pick_up = st.sidebar.number_input("Target wavelength (nm) for uploads", value=320.0, step=1.0)
+    if uploads_pda and st.sidebar.button("Extract wavelength from uploads"):
+        import tempfile, shutil
+        tmpdir = tempfile.mkdtemp(prefix="pymetaflow_pda_")
         try:
-            df = parse_labsolutions_ascii(f.name, f.read())
-            parsed[f.name] = df
-            report_rows.append({"file": f.name, "status": "parsed", "rows": len(df)})
-        except Exception as e:
-            report_rows.append({"file": f.name, "status": f"error: {e}", "rows": 0})
-report_df = pd.DataFrame(report_rows)
-if not report_df.empty:
-    st.subheader("Parsing report")
-    show_df(report_df)
+            for f in uploads_pda:
+                try:
+                    f.seek(0)
+                except Exception:
+                    pass
+                data = f.getvalue()
+                with open(os.path.join(tmpdir, os.path.basename(f.name)), "wb") as out:
+                    out.write(data)
+            combined_3d = dp.import_3D_data(
+                tmpdir, target_wavelength=float(wl_pick_up),
+                output_filename=f"combined_{int(wl_pick_up)}nm.csv"
+            )
+            if combined_3d is None or combined_3d.empty:
+                st.warning("No valid 3D tables found in the uploaded files.")
+            else:
+                st.success(f"Built matrix from {combined_3d.shape[1]-1} uploads at ≈{wl_pick_up} nm")
+                show_df(combined_3d.head(10))
+                combined = combined_3d
+        finally:
+            shutil.rmtree(tmpdir, ignore_errors=True)
 
-combined = outer_join_rt(parsed) if parsed else None
+# ---- 2) Optional: Upload metadata (.csv) ----
+st.sidebar.header("2) Optional: Upload metadata (.csv)")
+meta_file = st.sidebar.file_uploader("Metadata CSV (semicolon ';' as delimiter)", type=["csv", "txt"])
 
-# ------------------ Metadata / Bioactivity ------------------
+# ---- 3) Optional: Upload bioactivity (.csv) ----
+st.sidebar.header("3) Optional: Upload bioactivity (.csv)")
+bio_file = st.sidebar.file_uploader("Bioactivity CSV", type=["csv"])
+
+# ---- 4) Display preferences ----
+st.sidebar.header("4) Display preferences")
+use_static_table = st.sidebar.checkbox("Use static table (avoid PyArrow)", value=True, key="use_static_table")
+
+# ------------------ Metadata / Bioactivity tables ------------------
 meta_df = None
 if meta_file is not None:
     try:
@@ -280,18 +357,26 @@ if bio_file is not None:
     except Exception as e:
         st.error(f"Failed to read bioactivity: {e}")
 
-
-# Column mapping
+# ------------------ Column mapping & rename ------------------
 if meta_df is not None:
     cols = meta_df.columns.tolist()
-    # Sample ID
-    col_sample = st.selectbox("Column matching from HPLC data", options=cols, index=cols.index("Samples") if "Samples" in cols else 0)
-    # HPLC filename column (default to 'HPLC_filename' if present, else fall back to 'MS_filename' or first)
+    col_sample = st.selectbox(
+        "Sample ID column (matches chromatogram columns)",
+        options=cols,
+        index=cols.index("Samples") if "Samples" in cols else 0
+    )
     default_hplc = "HPLC_filename" if "HPLC_filename" in cols else ("MS_filename" if "MS_filename" in cols else cols[0])
-    col_hplc = st.selectbox("Column matching HPLC file stems", options=cols, index=cols.index(default_hplc))
-    # BioActivity filename column (optional)
+    col_hplc = st.selectbox(
+        "Metadata column containing HPLC file stems",
+        options=cols,
+        index=cols.index(default_hplc)
+    )
     if "BioAct_filename" in cols:
-        col_bio = st.selectbox("Column matching BioAct file stems (optional)", options=["<none>"] + cols, index=(cols.index("BioAct_filename")+1))
+        col_bio = st.selectbox(
+            "Metadata column with BioActivity file stems (optional)",
+            options=["<none>"] + cols,
+            index=(cols.index("BioAct_filename") + 1)
+        )
         if col_bio == "<none>":
             col_bio = None
     else:
@@ -300,8 +385,7 @@ if meta_df is not None:
 else:
     col_sample, col_hplc, col_bio = None, None, None
 
-
-# Rename combined columns according to metadata mapping
+# Rename combined columns according to metadata mapping (if we have a matrix)
 if combined is not None:
     file_stems = [c for c in combined.columns if c != "RT(min)"]
     if meta_df is not None and col_sample and col_hplc:
@@ -309,11 +393,9 @@ if combined is not None:
         for _, row in meta_df.iterrows():
             stem = str(row[col_hplc]).replace(".txt", "")
             name_map[stem] = str(row[col_sample])
-        ren = {}
-        for stem in file_stems:
-            if stem in name_map:
-                ren[stem] = name_map[stem]
-        combined = combined.rename(columns=ren)
+        ren = {stem: name_map[stem] for stem in file_stems if stem in name_map}
+        if ren:
+            combined = combined.rename(columns=ren)
 
 # ------------------ Preprocessing controls ------------------
 st.markdown("---")
@@ -1009,7 +1091,7 @@ else:
 		# ---------------- PCA ----------------
             with st.expander("PCA", expanded=True):
                 n_comp = st.slider("Components", min_value=2, max_value=10, value=2, step=1)
-                scale_pca = st.checkbox("Standardize features before PCA", value=True)
+                scale_pca = st.checkbox("Standardize features before PCA", value=False)
 
                 Xp = X.copy()
                 if scale_pca:
