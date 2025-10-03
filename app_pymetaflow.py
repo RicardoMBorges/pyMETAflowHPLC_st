@@ -1019,19 +1019,27 @@ else:
                 scores = pca.fit_transform(Xp)
                 expvar = pca.explained_variance_ratio_ * 100
 
-                # Scores plot
+                # Scores plot (PC1 vs PC2)
                 df_scores = pd.DataFrame({"PC1": scores[:, 0], "PC2": scores[:, 1], "Sample": samples})
+
                 if labels is not None:
                     df_scores["Label"] = pd.Series(labels, dtype="object").fillna("NA").astype(str).values
                     figp = px.scatter(
                         df_scores, x="PC1", y="PC2", color="Label", hover_name="Sample",
-                        title=f"PCA (PC1 {expvar[0]:.1f}%, PC2 {expvar[1]:.1f}%)"
+                        title="PCA Scores"
                     )
                 else:
                     figp = px.scatter(
                         df_scores, x="PC1", y="PC2", hover_name="Sample",
-                        title=f"PCA (PC1 {expvar[0]:.1f}%, PC2 {expvar[1]:.1f}%)"
+                        title="PCA Scores"
                     )
+
+                # ⬇️ Add % contribution on the axes
+                figp.update_layout(
+                    xaxis_title=f"PC1 ({expvar[0]:.1f}%)",
+                    yaxis_title=f"PC2 ({expvar[1]:.1f}%)"
+                )
+
                 st.plotly_chart(figp, use_container_width=True)
 
                 # -------- NEW: Loadings plot (select any PC) --------
