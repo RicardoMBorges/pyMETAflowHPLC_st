@@ -186,11 +186,6 @@ streamlit run app_pymetaflow.py
 
   * Make sure you’re in the PCA panel of the Modeling section; the app computes and renders `%` in axis titles.
 
----
-
-## License
-
-Choose and add your preferred license here (e.g., MIT).
 
 ---
 
