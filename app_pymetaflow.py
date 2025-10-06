@@ -102,7 +102,7 @@ st.sidebar.markdown("""
 
 st.sidebar.markdown("""---""")
 
-TUTORIAL_URL = "https://github.com/RicardoMBorges/Gradient_verification_for_HPLC/blob/main/READme_Streamlit.md"
+TUTORIAL_URL = "https://github.com/RicardoMBorges/pyMETAflowHPLC_st/blob/main/README.md"
 try:
     st.sidebar.link_button("📘 Tutorial", TUTORIAL_URL)
 except Exception:
