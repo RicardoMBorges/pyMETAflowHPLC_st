@@ -3,6 +3,7 @@ import io
 import os
 import re
 from pathlib import Path
+from typing import List, Tuple
 from PIL import Image
 import zipfile
 import numpy as np
@@ -113,7 +114,7 @@ except Exception:
     )
 
 
-MockData_URL = "https://github.com/RicardoMBorges/Gradient_verification_for_HPLC/blob/main/READme_Streamlit.md"
+MockData_URL = "https://github.com/RicardoMBorges/Gradient_verification_for_HPLC/tree/main/Mock_data"
 try:
     st.sidebar.link_button("Mock Data", MockData_URL)
 except Exception:
@@ -250,7 +251,15 @@ def matrix_to_XY(df_grid: pd.DataFrame, sample_order: list) -> tuple:
     return X, feats
 
 # ------------------ Build 'combined' by selected mode ------------------
-combined = None
+# If we already imported PDA once, keep using it unless explicitly cleared
+combined = st.session_state.get("pda_df", None)
+pda_meta = st.session_state.get("pda_meta", None)
+
+#combined = None
+
+@st.cache_data(show_spinner="Reading PDA files…")
+def _import_3d_cached(folder: str, wl: float, outname: str):
+    return dp.import_3D_data(folder, target_wavelength=wl, output_filename=outname)
 
 if mode == "2D LabSolutions ASCII (uploads)":
     uploads_2d = st.sidebar.file_uploader(
@@ -276,53 +285,88 @@ if mode == "2D LabSolutions ASCII (uploads)":
 
 elif mode == "3D PDA (folder of .txt)":
     st.sidebar.markdown("Pick wavelength and a local folder of PDA ASCII files.")
-    wl_pick = st.sidebar.number_input("Target wavelength (nm)", value=320.0, step=1.0)
-    input_folder = st.sidebar.text_input("Local folder path with .txt files")
-    if st.sidebar.button("Extract traces at wavelength"):
+    wl_pick = st.sidebar.number_input("Target wavelength (nm)", value=320.0, step=1.0, key="pda_wl_folder")
+    input_folder = st.sidebar.text_input("Local folder path with .txt files", key="pda_folder_path")
+
+    colA, colB = st.sidebar.columns(2)
+    do_extract = colA.button("Extract traces at wavelength", key="pda_folder_extract")
+    do_clear   = colB.button("Clear current PDA matrix", key="pda_clear")
+
+    if do_clear:
+        st.session_state.pop("pda_df", None)
+        st.session_state.pop("pda_meta", None)
+        st.success("Cleared PDA matrix from memory.")
+
+    if do_extract:
         if input_folder and os.path.isdir(input_folder):
-            combined_3d = dp.import_3D_data(
-                input_folder, target_wavelength=float(wl_pick),
-                output_filename=f"combined_{int(wl_pick)}nm.csv"
+            combined_3d = _import_3d_cached(
+                input_folder, float(wl_pick), f"combined_{int(wl_pick)}nm.csv"
             )
+
             if combined_3d is None or combined_3d.empty:
                 st.error("No data combined from the folder.")
             else:
-                st.success(f"Built matrix from {combined_3d.shape[1]-1} files at ≈{wl_pick} nm")
-                show_df(combined_3d.head(10))
-                combined = combined_3d
+                st.session_state["pda_df"] = combined_3d
+                st.session_state["pda_meta"] = {"src":"folder","path":input_folder,"wl":float(wl_pick)}
+                combined = combined_3d  # available this run too
+                st.success(f"Built & cached matrix from {combined_3d.shape[1]-1} files at ≈{wl_pick} nm")
         else:
             st.error("Please enter a valid existing folder path.")
+
+    # Show current matrix if we have one
+    if st.session_state.get("pda_df") is not None:
+        meta = st.session_state.get("pda_meta", {})
+        st.caption(f"Current PDA matrix (source={meta.get('src','?')}, wl≈{meta.get('wl','?')} nm)")
+        show_df(st.session_state["pda_df"].head(10))
+        combined = st.session_state["pda_df"]
+
 
 elif mode == "3D PDA (uploaded .txt)":
     uploads_pda = st.sidebar.file_uploader(
         "PDA ASCII .txt exports (multi-wavelength 3D tables)",
-        type=["txt"], accept_multiple_files=True
+        type=["txt"], accept_multiple_files=True, key="pda_uploads"
     )
-    wl_pick_up = st.sidebar.number_input("Target wavelength (nm) for uploads", value=320.0, step=1.0)
-    if uploads_pda and st.sidebar.button("Extract wavelength from uploads"):
-        import tempfile, shutil
+    wl_pick_up = st.sidebar.number_input("Target wavelength (nm) for uploads",
+                                         value=320.0, step=1.0, key="pda_wl_uploads")
+    colA, colB = st.sidebar.columns(2)
+    do_extract = colA.button("Extract wavelength from uploads", key="pda_upload_extract")
+    do_clear   = colB.button("Clear current PDA matrix", key="pda_upload_clear")
+
+    if do_clear:
+        st.session_state.pop("pda_df", None)
+        st.session_state.pop("pda_meta", None)
+        st.success("Cleared PDA matrix from memory.")
+
+    if uploads_pda and do_extract:
+        import tempfile, shutil, os
         tmpdir = tempfile.mkdtemp(prefix="pymetaflow_pda_")
         try:
             for f in uploads_pda:
-                try:
-                    f.seek(0)
-                except Exception:
-                    pass
                 data = f.getvalue()
                 with open(os.path.join(tmpdir, os.path.basename(f.name)), "wb") as out:
                     out.write(data)
-            combined_3d = dp.import_3D_data(
-                tmpdir, target_wavelength=float(wl_pick_up),
-                output_filename=f"combined_{int(wl_pick_up)}nm.csv"
-            )
+            combined_3d = _import_3d_cached(
+                tmpdir, float(wl_pick_up), f"combined_{int(wl_pick_up)}nm.csv")
             if combined_3d is None or combined_3d.empty:
                 st.warning("No valid 3D tables found in the uploaded files.")
             else:
-                st.success(f"Built matrix from {combined_3d.shape[1]-1} uploads at ≈{wl_pick_up} nm")
-                show_df(combined_3d.head(10))
+                st.session_state["pda_df"] = combined_3d
+                st.session_state["pda_meta"] = {
+                    "src":"uploads",
+                    "wl":float(wl_pick_up),
+                    "files":[f.name for f in uploads_pda]
+                }
                 combined = combined_3d
+                st.success(f"Built & cached matrix from {combined_3d.shape[1]-1} uploads at ≈{wl_pick_up} nm")
         finally:
             shutil.rmtree(tmpdir, ignore_errors=True)
+
+    if st.session_state.get("pda_df") is not None:
+        meta = st.session_state.get("pda_meta", {})
+        st.caption(f"Current PDA matrix (source={meta.get('src','?')}, wl≈{meta.get('wl','?')} nm)")
+        show_df(st.session_state["pda_df"].head(10))
+        combined = st.session_state["pda_df"]
+
 
 # ---- 2) Optional: Upload metadata (.csv) ----
 st.sidebar.header("2) Optional: Upload metadata (.csv)")
@@ -1353,4 +1397,163 @@ if df_aligned is not None:
         mime="application/zip"
     )
 
-st.caption("© pyMETAflow HPLC — Ricardo M. Borges / LAABio-IPPN-UFRJ")
+
+# ------------------ Export (MetaboAnalyst) ---------------------------------------
+st.markdown("---")
+st.subheader("Export to MetaboAnalyst")
+
+import io, re, time
+from pathlib import Path
+
+# 0) Pick which matrix to export (prefer fully processed)
+try:
+    export_df, export_source_key = get_working_matrix()   # <- your helper returning (df, key)
+except Exception:
+    # Fallback if you don't have get_working_matrix():
+    # export_df = normalized_df or df_aligned or referenced_df or processed0 or combined
+    export_df = None
+    export_source_key = "unknown"
+
+if not isinstance(export_df, pd.DataFrame) or export_df.empty:
+    st.info("No matrix available to export yet. Load/preprocess data first.")
+elif meta_df is None or meta_df.empty:
+    st.warning("Load metadata (.csv) to include class labels for MetaboAnalyst.")
+else:
+    axis_col = "RT(min)"
+    if axis_col not in export_df.columns:
+        st.error(f"Axis column '{axis_col}' not found in export matrix.")
+    else:
+        sample_cols = [c for c in export_df.columns if c != axis_col]
+
+        st.caption(f"Using data source: **{export_source_key}**  |  Samples detected: **{len(sample_cols)}**")
+
+        # --- Sanitizer: alnum + underscore only (matches typical MetaboAnalyst expectations)
+        def _san(x: str) -> str:
+            return re.sub(r"[^A-Za-z0-9_]", "", str(x))
+
+        # 1) Guess the metadata column that matches the current sample names (after sanitization)
+        samples_sanit = {_san(c) for c in sample_cols}
+        guess_id, best_hits = None, -1
+        for col in meta_df.columns:
+            vals = {_san(v) for v in meta_df[col].astype(str).tolist()}
+            hits = len(samples_sanit & vals)
+            if hits > best_hits:
+                best_hits, guess_id = hits, col
+
+        # 2) Guess a class/phenotype column
+        guess_class = None
+        for key in ("class", "group", "condition", "phenotype"):
+            cands = [c for c in meta_df.columns if key in c.lower()]
+            if cands:
+                guess_class = cands[0]
+                break
+        if guess_class is None and "ATTRIBUTE_classification" in meta_df.columns:
+            guess_class = "ATTRIBUTE_classification"
+        if guess_class is None:
+            guess_class = meta_df.columns[-1]  # last column as fallback
+
+        c1, c2 = st.columns(2)
+        with c1:
+            sample_id_col = st.selectbox(
+                "Metadata column that matches sample columns",
+                options=meta_df.columns.tolist(),
+                index=(meta_df.columns.tolist().index(guess_id) if guess_id in meta_df.columns else 0),
+                help="This column’s values should match your chromatogram column names (after sanitization)."
+            )
+        with c2:
+            class_col = st.selectbox(
+                "Metadata class / phenotype column",
+                options=meta_df.columns.tolist(),
+                index=(meta_df.columns.tolist().index(guess_class) if guess_class in meta_df.columns else 0)
+            )
+
+        # Overlap preview
+        meta_ids_sanit = meta_df[sample_id_col].astype(str).map(_san)
+        overlap = len(samples_sanit & set(meta_ids_sanit))
+        st.caption(f"Matched **{overlap}/{len(sample_cols)}** samples after sanitization.")
+
+        # Optional: show missing ones
+        missing = sorted(list(samples_sanit - set(meta_ids_sanit)))
+        if missing:
+            with st.expander("Samples missing metadata (will be excluded)"):
+                show_df(pd.DataFrame({"missing_sample_id_after_sanitize": missing}))
+
+        # Output filename
+        default_name = f"metaboanalyst_input_{time.strftime('%Y%m%d_%H%M%S')}.csv"
+        out_name = st.text_input("Output filename", value=default_name)
+
+        # 3) Build & download
+        build_btn = st.button("Build MetaboAnalyst CSV")
+        if build_btn:
+            try:
+                csv_bytes = None
+
+                # Prefer your dp.export_metaboanalyst if available
+                if hasattr(dp, "export_metaboanalyst"):
+                    out_path = Path(out_name).name  # simple local filename
+                    _ = dp.export_metaboanalyst(
+                        aligned_df=export_df,          # any feature×samples matrix with first col RT(min)
+                        df_metadata=meta_df,
+                        sample_id_col=sample_id_col,
+                        class_col=class_col,
+                        output_file=out_path
+                    )
+                    with open(out_path, "rb") as fh:
+                        csv_bytes = fh.read()
+                else:
+                    # Fallback: in-memory writer matching MetaboAnalyst format
+                    # Row 1: header (axis + samples)
+                    # Row 2: class labels (blank in first cell)
+                    # Remaining: data matrix
+                    import csv
+                    df_al = export_df.copy()
+
+                    # Sanitize sample columns
+                    orig_cols = list(df_al.columns)
+                    new_cols = [orig_cols[0]] + [_san(c) for c in orig_cols[1:]]
+                    df_al.columns = new_cols
+                    sample_cols_san = new_cols[1:]
+
+                    # Align metadata
+                    meta2 = meta_df.copy()
+                    meta2[sample_id_col] = meta2[sample_id_col].astype(str).map(_san)
+                    meta2[class_col]     = meta2[class_col].astype(str).map(_san)
+                    meta_idx = meta2.set_index(sample_id_col)
+                    cls_series = meta_idx.reindex(sample_cols_san)[class_col]
+                    valid = cls_series.dropna().index.tolist()
+
+                    # Build reduced matrix with valid samples only
+                    new_df = df_al[[axis_col] + valid].copy()
+
+                    buf = io.StringIO()
+                    w = csv.writer(buf)
+                    # header row
+                    w.writerow(new_df.columns.tolist())
+                    # class row (first cell blank)
+                    w.writerow([""] + cls_series.loc[valid].tolist())
+                    # data rows
+                    for i in range(len(new_df)):
+                        w.writerow(new_df.iloc[i].values.tolist())
+                    csv_bytes = buf.getvalue().encode("utf-8")
+
+                if not csv_bytes:
+                    raise RuntimeError("Failed to build CSV bytes.")
+
+                st.success(f"MetaboAnalyst CSV built ({overlap} samples with class labels).")
+                st.download_button(
+                    "⬇️ Download MetaboAnalyst CSV",
+                    data=csv_bytes,
+                    file_name=out_name,
+                    mime="text/csv"
+                )
+
+                # Tiny preview (first rows)
+                try:
+                    prev = pd.read_csv(io.BytesIO(csv_bytes), header=None, nrows=6)
+                    st.caption("Preview (first rows):")
+                    st.dataframe(prev, use_container_width=True)
+                except Exception:
+                    pass
+
+            except Exception as e:
+                st.error(f"Export failed: {e}")
