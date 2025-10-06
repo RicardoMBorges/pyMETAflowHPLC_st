@@ -114,7 +114,7 @@ except Exception:
     )
 
 
-MockData_URL = "https://github.com/RicardoMBorges/Gradient_verification_for_HPLC/tree/main/Mock_data"
+MockData_URL = "https://github.com/RicardoMBorges/pyMETAflowHPLC_st/tree/main/Mock_data"
 try:
     st.sidebar.link_button("Mock Data", MockData_URL)
 except Exception:
