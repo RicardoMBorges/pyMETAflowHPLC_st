@@ -881,12 +881,12 @@ if df_aligned is not None:
     st.markdown("---")
     st.subheader("STOCSY")
 
-    # Controls
+    # --- STOCSY controls (rename `mode` → `stocsy_model`) ---
     cols = st.columns([2, 1, 1])
     with cols[0]:
         target_rt = st.number_input("Target RT (min)", value=11.25, step=0.05, format="%.2f")
     with cols[1]:
-        mode = st.selectbox(
+        stocsy_model = st.selectbox(
             "Model",
             ["linear", "exponential", "sinusoidal", "sigmoid", "gaussian", "fft", "polynomial", "piecewise", "skewed_gauss"],
             index=0
@@ -984,7 +984,7 @@ if df_aligned is not None:
         # Prefer user's dp implementation if available
         if dp is not None and hasattr(dp, "STOCSY_LC_mode"):
             try:
-                corr, covar = dp.STOCSY_LC_mode(target_for_run, Xmat, rt_vals, mode=mode)
+                corr, covar = dp.STOCSY_LC_mode(target_for_run, Xmat, rt_vals, mode=stocsy_model)
             except Exception as e:
                 st.warning(f"dp.STOCSY_LC_mode failed ({e}). Falling back to linear implementation.")
 
@@ -1014,7 +1014,7 @@ if df_aligned is not None:
         st.download_button(
             "⬇️ Download STOCSY table (CSV)",
             data=csv_bytes,
-            file_name=f"stocsy_{target_for_run:.2f}min_{mode}.csv",
+            file_name=f"stocsy_{target_for_run:.2f}min_{stocsy_model}.csv",
             mime="text/csv"
         )
 
