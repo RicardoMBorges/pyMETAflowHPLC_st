@@ -124,6 +124,18 @@ except Exception:
         '</a>',
         unsafe_allow_html=True,
     )
+    
+VIDEO_URL = "https://youtu.be/N6gQGo32kCM"
+try:
+    st.sidebar.link_button("Video", VIDEO_URL)
+except Exception:
+    st.sidebar.markdown(
+        f'<a href="{VIDEO_URL}" target="_blank">'
+        '<button style="padding:0.6rem 1rem; border-radius:8px; border:1px solid #ddd; cursor:pointer;">📘 Tutorial</button>'
+        '</a>',
+        unsafe_allow_html=True,
+    )
+
 st.sidebar.markdown("""---""")
 # ================== INPUTS & PARSING (ORDERED) ==================
 
@@ -1557,3 +1569,24 @@ else:
 
             except Exception as e:
                 st.error(f"Export failed: {e}")
+
+
+st.markdown("---")
+st.subheader(
+    """
+Proposed Method for Discovery in NP:
+    """
+)
+Proposal_PATH = STATIC_DIR / "proposal.png"
+
+try:
+    logo = Image.open(Proposal_PATH)  # raises if missing
+    st.image(logo, use_container_width=True)
+except FileNotFoundError:
+    st.warning("Logo not found at static/proposal.png")
+
+st.markdown(
+    """
+---
+    """
+)
