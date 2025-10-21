@@ -1,4 +1,3 @@
-
 import io
 import os
 import re
@@ -131,7 +130,7 @@ try:
 except Exception:
     st.sidebar.markdown(
         f'<a href="{VIDEO_URL}" target="_blank">'
-        '<button style="padding:0.6rem 1rem; border-radius:8px; border:1px solid #ddd; cursor:pointer;">📘 Tutorial</button>'
+        '<button style="padding:0.6rem 1rem; border-radius:8px; border:1px solid #ddd; cursor:pointer;">▶️ Video</button>'
         '</a>',
         unsafe_allow_html=True,
     )
@@ -158,14 +157,27 @@ def parse_labsolutions_ascii(file_name: str, raw_bytes: bytes) -> pd.DataFrame:
         text = raw_bytes.decode("utf-8", errors="ignore")
     m = HEADER_RE.search(text)
     if not m:
-        raise ValueError("Header 'R.Time (min)\\tIntensity' not found in file.")
+        raise ValueError("Could not find a header like 'R.Time (min)    Intensity' in the file.")
     table = text[m.start():]
-    df = pd.read_csv(io.StringIO(table), sep="\t", decimal=",", engine="python")
+    # accept tabs or multiple spaces between columns
+    df = pd.read_csv(io.StringIO(table), sep=r"\s+", engine="python")
+
     df = df.iloc[:, :2].copy()
     df.columns = ["RT(min)", "Intensity"]
-    df = df[pd.to_numeric(df["RT(min)"], errors="coerce").notna()]
-    df["RT(min)"] = df["RT(min)"].astype(float)
-    df["Intensity"] = pd.to_numeric(df["Intensity"], errors="coerce")
+
+    # robust numeric parse (accept both 11.25 and 11,25)
+    df["RT(min)"] = pd.to_numeric(
+        df["RT(min)"].astype(str).str.replace(",", ".", regex=False),
+        errors="coerce"
+    )
+    df["Intensity"] = pd.to_numeric(
+        df["Intensity"].astype(str).str.replace(",", ".", regex=False),
+        errors="coerce"
+    )
+
+    # drop rows without valid RT
+    df = df[df["RT(min)"].notna()].reset_index(drop=True)
+
     base = os.path.splitext(os.path.basename(file_name))[0]
     return df.rename(columns={"Intensity": base}).reset_index(drop=True)
 
@@ -192,11 +204,19 @@ def show_df(df: pd.DataFrame):
 
 # ------------------ Preprocessing helpers (unchanged) ------------------
 def resample_to_grid(df: pd.DataFrame, step: float, rt_min=None, rt_max=None):
-    if df is None:
+    if df is None or not isinstance(df, pd.DataFrame) or df.empty or "RT(min)" not in df.columns:
         return None, None
-    x = df["RT(min)"].values
+
+    # coerce to numeric just in case upstream missed something
+    x = pd.to_numeric(df["RT(min)"], errors="coerce").values
+    if x.size == 0 or np.all(np.isnan(x)):
+        return None, None
+
+    # ensure positive step
+    step = float(step) if step and float(step) > 0 else 0.02
     grid_min = float(rt_min) if rt_min is not None else float(np.nanmin(x))
     grid_max = float(rt_max) if rt_max is not None else float(np.nanmax(x))
+
     if grid_max <= grid_min:
         grid_max = grid_min + 0.01
     grid = np.arange(grid_min, grid_max + step/2, step, dtype=float)
@@ -262,6 +282,14 @@ def matrix_to_XY(df_grid: pd.DataFrame, sample_order: list) -> tuple:
     feats = [f"{rt:.4f}" for rt in df_grid["RT(min)"].values]
     return X, feats
 
+def sanitize_X_for_modeling(X, rt_axis):
+    mask_any = np.isfinite(X).any(axis=0)
+    X = X[:, mask_any]; rt_axis = rt_axis[mask_any]
+    from sklearn.impute import SimpleImputer
+    X = SimpleImputer(strategy="median").fit_transform(X)
+    mask_var = X.std(axis=0) > 0
+    return X[:, mask_var], rt_axis[mask_var]
+
 # ------------------ Build 'combined' by selected mode ------------------
 # If we already imported PDA once, keep using it unless explicitly cleared
 combined = st.session_state.get("pda_df", None)
@@ -269,7 +297,7 @@ pda_meta = st.session_state.get("pda_meta", None)
 
 #combined = None
 
-@st.cache_data(show_spinner="Reading PDA files…")
+@st.cache_data(show_spinner="Reading PDA files…", hash_funcs={Path: str})
 def _import_3d_cached(folder: str, wl: float, outname: str):
     return dp.import_3D_data(folder, target_wavelength=wl, output_filename=outname)
 
@@ -294,6 +322,11 @@ if mode == "2D LabSolutions ASCII (uploads)":
         st.subheader("Parsing report")
         show_df(report_df)
     combined = outer_join_rt(parsed) if parsed else None
+    
+    # persist raw combined matrix
+    if combined is not None and not combined.empty:
+        st.session_state["combined"] = combined
+
 
 elif mode == "3D PDA (folder of .txt)":
     st.sidebar.markdown("Pick wavelength and a local folder of PDA ASCII files.")
@@ -321,6 +354,9 @@ elif mode == "3D PDA (folder of .txt)":
                 st.session_state["pda_df"] = combined_3d
                 st.session_state["pda_meta"] = {"src":"folder","path":input_folder,"wl":float(wl_pick)}
                 combined = combined_3d  # available this run too
+                if combined is not None and not combined.empty:
+                    st.session_state["combined"] = combined
+
                 st.success(f"Built & cached matrix from {combined_3d.shape[1]-1} files at ≈{wl_pick} nm")
         else:
             st.error("Please enter a valid existing folder path.")
@@ -369,6 +405,10 @@ elif mode == "3D PDA (uploaded .txt)":
                     "files":[f.name for f in uploads_pda]
                 }
                 combined = combined_3d
+                
+                if combined is not None and not combined.empty:
+                    st.session_state["combined"] = combined
+
                 st.success(f"Built & cached matrix from {combined_3d.shape[1]-1} uploads at ≈{wl_pick_up} nm")
         finally:
             shutil.rmtree(tmpdir, ignore_errors=True)
@@ -451,6 +491,8 @@ if combined is not None:
         ren = {stem: name_map[stem] for stem in file_stems if stem in name_map}
         if ren:
             combined = combined.rename(columns=ren)
+            st.session_state["combined"] = combined
+
 
 # ------------------ Preprocessing controls ------------------
 st.markdown("---")
@@ -480,9 +522,21 @@ with c6:
             st.warning("RT range not parsed. Use format like: 0.5,45")
 
 df_grid = None
-if combined is not None:
+if (combined is not None
+    and isinstance(combined, pd.DataFrame)
+    and not combined.empty
+    and "RT(min)" in combined.columns
+    and pd.to_numeric(combined["RT(min)"], errors="coerce").notna().any()):
+    
     df_grid, _grid = resample_to_grid(combined, step=float(grid_step), rt_min=rt_min, rt_max=rt_max)
-    df_grid = preprocess_matrix(df_grid, int(smooth_win), baseline_method, float(baseline_param), norm_mode)
+    if df_grid is not None and not df_grid.empty:
+        df_grid = preprocess_matrix(df_grid, int(smooth_win), baseline_method, float(baseline_param), norm_mode)
+        if df_grid is not None and not df_grid.empty:
+            st.session_state["preprocessed_df"] = df_grid
+else:
+    st.info("No valid RT values found yet (check your ASCII header or decimal separator).")
+
+
 
 # ---------------- RT CLIPPING (before alignment & referencing) ----------------
 st.markdown("---")
@@ -530,6 +584,11 @@ else:
 
     # AUTO-APPLY the saved bounds to produce the ACTIVE (clipped) df every rerun
     active_df = dp.filter_rt_range(full_df, float(saved_lo), float(saved_hi), axis_column=axis_col)
+    
+    if active_df is not None and not active_df.empty:
+        st.session_state["clipped_df"] = active_df
+
+    
     if clip_target_name == "df_grid":
         df_grid = active_df
     else:
@@ -566,6 +625,11 @@ else:
             df_grid = active_df
         else:
             combined = active_df
+            
+        if active_df is not None and not active_df.empty:
+            st.session_state["clipped_df"] = active_df
+
+            
         st.success(f"Reset {clip_target_name} RT range to [{rt_min_full:.3f}, {rt_max_full:.3f}]")
 
     if do_apply:
@@ -579,6 +643,8 @@ else:
                 df_grid = filtered
             else:
                 combined = filtered
+            st.session_state["clipped_df"] = filtered
+
             st.success(f"Clipped {clip_target_name} to RT ∈ [{lo:.3f}, {hi:.3f}] — {len(filtered)} points.")
 
     # Preview current (post-clip) shape
@@ -614,7 +680,7 @@ else:
     with c2:
         target_position = st.number_input("Target RT (min)", value=mid, step=0.01, format="%.3f")
     with c3:
-        offsetppm = st.text_input("Anchor RT (optional)", value="")  # leave blank for auto-peak
+        offsetppm = st.text_input("Anchor RT (min, optional)", value="")  # leave blank for auto-peak
 
     # Search window
     d1, d2 = st.columns(2)
@@ -694,6 +760,11 @@ else:
                 df_grid = referenced_df
             else:
                 combined = referenced_df
+                
+            if referenced_df is not None and not referenced_df.empty:
+                st.session_state["referenced_df"] = referenced_df
+
+                
             st.success(f"Replaced {ref_in_name} with referenced data.")
 
 # ------------------ Alignment (Icoshift / PAFFT / RAFFT) ------------------
@@ -712,18 +783,32 @@ if align_source is not None:
     sample_names = list(align_source.columns[1:])
     method, params = alignment_controls(align_source, sample_names=sample_names)
     df_aligned = align_df(align_source, method, **params)
+    
+    if df_aligned is not None and not df_aligned.empty:
+        st.session_state["aligned_df"] = df_aligned
+
+    
 else:
     st.info("Upload and preprocess data (and/or reference RT) to enable alignment.")
 
 
 
 # ---------- NORMALIZATION & SCALING ----------
+
+# Helper: pick the most processed matrix available
+def get_working_matrix():
+    for key in ["normalized_scaled_df", "aligned_df", "referenced_df", "preprocessed_df", "clipped_df", "combined"]:
+        df = st.session_state.get(key, None)
+        if isinstance(df, pd.DataFrame) and not df.empty:
+            return df, key
+    return None, None
+
 st.markdown("---")
 st.subheader("Normalization & Scaling")
 
 # Choose the matrix we will operate on:
-# Prefer the resampled+preprocessed grid; fall back to the raw combined matrix
-working_df = df_grid if df_grid is not None else combined
+# Choose the most processed matrix available
+working_df, _working_key = get_working_matrix()
 if working_df is None:
     st.info("Load and preprocess data to enable normalization/scaling.")
 else:
@@ -860,6 +945,10 @@ else:
     processed_df = apply_pipeline(working_df)
     st.success("Applied transforms.")
     show_df(processed_df.head(3))
+    
+    if processed_df is not None and not processed_df.empty:
+        st.session_state["normalized_scaled_df"] = processed_df
+
 
 
 # ------------------ STOCSY (Structured correlation) ------------------
@@ -1050,42 +1139,35 @@ if df_aligned is not None:
         fig2.update_layout(xaxis_title="RT (min)", yaxis_title=f"Intensity + offset (step={step})")
         st.plotly_chart(fig2, use_container_width=True)
     with t3:
-        mat = df_aligned[[c for c in df_aligned.columns if c != "RT(min)"]].T.values
+        max_points = 5000
+        sub = df_aligned
+        if len(df_aligned) > max_points:
+            sub = df_aligned.iloc[:: int(np.ceil(len(df_aligned)/max_points)), :]
+
+        mat = sub[[c for c in sub.columns if c != "RT(min)"]].T.values
         fig3 = go.Figure(data=go.Heatmap(
             z=mat,
-            x=df_aligned["RT(min)"].values,
-            y=[c for c in df_aligned.columns if c != "RT(min)"],
+            x=sub["RT(min)"].values,
+            y=[c for c in sub.columns if c != "RT(min)"],
             coloraxis="coloraxis"
         ))
+
         fig3.update_layout(title="Intensity heatmap", xaxis_title="RT (min)", yaxis_title="Sample", coloraxis_colorscale="Viridis")
         st.plotly_chart(fig3, use_container_width=True)
-
-def get_working_matrix():
-    # strict precedence: the furthest processed wins
-    for key in ["normalized_scaled_df", "aligned_df", "referenced_df", "preprocessed_df", "clipped_df", "combined"]:
-        df = st.session_state.get(key, None)
-        if df is not None and isinstance(df, pd.DataFrame) and not df.empty:
-            return df, key
-    return None, None
 
 
 # ------------------ Modeling (PCA / PLS) ------------------
 # prefer aligned, else preprocessed grid, else raw combined
 model_df, source_key = get_working_matrix()
-if model_df is None:
-    st.subheader("Modeling")
-    st.info("No matrix available for modeling yet. Load data, preprocess, and/or align first.")
-else:
-    st.caption(f"Using data source: **{source_key}**")
-    samples = [c for c in model_df.columns if c != "RT(min)"]
-    X, feats = matrix_to_XY(model_df, samples)
-    # ... PCA / PLS sections unchanged (but use model_df for RT axis) ...
 
 if model_df is None:
     st.subheader("Modeling")
     st.info("No matrix available for modeling yet. Load data, preprocess, and/or align first.")
 else:
     from typing import List
+
+    st.subheader("Modeling")
+    st.caption(f"Using data source: **{source_key}**")
 
     def _norm_name(s):
         return str(s).replace(".txt", "").strip()
@@ -1100,7 +1182,6 @@ else:
                 best_col, best_hits = col, hits
         return best_col
 
-    st.subheader("Modeling")
     if not SKLEARN_AVAILABLE:
         st.warning(
             "scikit-learn is not installed. Install it to enable PCA/PLS sections.\n"
@@ -1143,93 +1224,116 @@ else:
                     )
                     labels = None
 
-		# ---------------- PCA ----------------
-            with st.expander("PCA", expanded=True):
-                n_comp = st.slider("Components", min_value=2, max_value=10, value=2, step=1)
-                scale_pca = st.checkbox("Standardize features before PCA", value=False)
+        # ---------------- PCA ----------------
+        with st.expander("PCA", expanded=True):
+            n_comp = st.slider("Components", min_value=2, max_value=10, value=2, step=1)
+            scale_pca = st.checkbox("Standardize features before PCA", value=False)
 
-                Xp = X.copy()
-                if scale_pca:
-                    Xp = StandardScaler(with_mean=True, with_std=True).fit_transform(Xp)
+            # Start with raw sample×feature matrix
+            Xp = X.copy()
+            # RT axis for loadings (will track feature filtering)
+            rt_axis_full = np.asarray(model_df["RT(min)"].values, dtype=float)
 
-                pca = PCA(n_components=n_comp, random_state=0)
-                scores = pca.fit_transform(Xp)
-                expvar = pca.explained_variance_ratio_ * 100
+            # 1) Drop features that are all-NaN across samples
+            mask_any = np.isfinite(Xp).any(axis=0)
+            Xp = Xp[:, mask_any]
+            rt_axis_used = rt_axis_full[mask_any]
 
-                # Scores plot (PC1 vs PC2)
-                df_scores = pd.DataFrame({"PC1": scores[:, 0], "PC2": scores[:, 1], "Sample": samples})
+            # 2) Impute remaining NaNs by column median
+            from sklearn.impute import SimpleImputer
+            Xp = SimpleImputer(strategy="median").fit_transform(Xp)
 
-                if labels is not None:
-                    df_scores["Label"] = pd.Series(labels, dtype="object").fillna("NA").astype(str).values
-                    figp = px.scatter(
-                        df_scores, x="PC1", y="PC2", color="Label", hover_name="Sample",
-                        title="PCA Scores"
-                    )
-                else:
-                    figp = px.scatter(
-                        df_scores, x="PC1", y="PC2", hover_name="Sample",
-                        title="PCA Scores"
-                    )
+            # 3) Drop zero-variance features (after imputation)
+            mask_var = Xp.std(axis=0) > 0
+            Xp = Xp[:, mask_var]
+            rt_axis_used = rt_axis_used[mask_var]
 
-                # ⬇️ Add % contribution on the axes
-                figp.update_layout(
-                    xaxis_title=f"PC1 ({expvar[0]:.1f}%)",
-                    yaxis_title=f"PC2 ({expvar[1]:.1f}%)"
+            # 4) Optional scaling
+            if scale_pca:
+                Xp = StandardScaler(with_mean=True, with_std=True).fit_transform(Xp)
+
+            # PCA
+            pca = PCA(n_components=min(n_comp, Xp.shape[1]), random_state=0)
+            scores = pca.fit_transform(Xp)
+            expvar = pca.explained_variance_ratio_ * 100
+
+
+            # Scores plot (PC1 vs PC2)
+            df_scores = pd.DataFrame({"PC1": scores[:, 0], "PC2": scores[:, 1], "Sample": samples})
+            if labels is not None:
+                df_scores["Label"] = pd.Series(labels, dtype="object").fillna("NA").astype(str).values
+                figp = px.scatter(
+                    df_scores, x="PC1", y="PC2", color="Label", hover_name="Sample",
+                    title="PCA Scores"
+                )
+            else:
+                figp = px.scatter(
+                    df_scores, x="PC1", y="PC2", hover_name="Sample",
+                    title="PCA Scores"
                 )
 
-                st.plotly_chart(figp, use_container_width=True)
+            # ⬇️ Add % contribution on the axes
+            figp.update_layout(
+                xaxis_title=f"PC1 ({expvar[0]:.1f}%)",
+                yaxis_title=f"PC2 ({expvar[1]:.1f}%)"
+            )
+            st.plotly_chart(figp, use_container_width=True)
 
-                # -------- NEW: Loadings plot (select any PC) --------
-                st.markdown("**PCA X-Loadings**")
-                max_pc = int(pca.n_components_)
-                pc_idx = st.number_input("Component to show", min_value=1, max_value=max_pc, value=1, step=1)
-                # pca.components_: shape (n_components, n_features); features follow RT order
-                load_vec = pca.components_[pc_idx - 1, :]
+            # -------- Loadings plot (select any PC) --------
+            st.markdown("**PCA X-Loadings**")
+            max_pc = int(pca.n_components_)
+            pc_idx = st.number_input("Component to show", min_value=1, max_value=max_pc, value=1, step=1)
+            # pca.components_: shape (n_components, n_features); features follow RT order
+            load_vec = pca.components_[pc_idx - 1, :]
 
-                # Optional helpers
-                show_abs = st.checkbox("Show absolute loadings", value=False)
-                smooth_pts = st.number_input("Smooth (moving average, pts)", min_value=1, value=1, step=1)
+            # Optional helpers
+            show_abs = st.checkbox("Show absolute loadings", value=False)
+            smooth_pts = st.number_input("Smooth (moving average, pts)", min_value=1, value=1, step=1)
 
-                y_load = np.abs(load_vec) if show_abs else load_vec
-                if smooth_pts > 1:
-                    y_load = pd.Series(y_load).rolling(window=int(smooth_pts), min_periods=1, center=True).mean().values
+            y_load = np.abs(load_vec) if show_abs else load_vec
+            if smooth_pts > 1:
+                y_load = pd.Series(y_load).rolling(window=int(smooth_pts), min_periods=1, center=True).mean().values
 
-                # RT axis from the working matrix used for PCA
-                rt_axis = np.asarray(model_df["RT(min)"].values, dtype=float)
+            # Use the filtered RT axis that matches the columns kept in Xp
+            # (rt_axis_used was built above alongside Xp)
+            if len(y_load) != len(rt_axis_used):
+                n = min(len(y_load), len(rt_axis_used))
+                y_load = y_load[:n]
+                rt_axis_used = rt_axis_used[:n]
 
-                df_load = pd.DataFrame({
-                    "RT(min)": rt_axis,
-                    "Loading": y_load
-                })
-
-                fig_load = px.line(
-                    df_load, x="RT(min)", y="Loading",
-                    title=f"PCA Loading — PC{pc_idx} ({'abs ' if show_abs else ''}loadings)"
-                )
-                fig_load.update_layout(xaxis_title="RT (min)", yaxis_title="Loading weight")
-                st.plotly_chart(fig_load, use_container_width=True)
+            df_load = pd.DataFrame({
+                "RT(min)": rt_axis_used,
+                "Loading": y_load
+            })
 
 
+            fig_load = px.line(
+                df_load, x="RT(min)", y="Loading",
+                title=f"PCA Loading — PC{pc_idx} ({'abs ' if show_abs else ''}loadings)"
+            )
+            fig_load.update_layout(xaxis_title="RT (min)", yaxis_title="Loading weight")
+            st.plotly_chart(fig_load, use_container_width=True)
 
-
-        # ---------------- PLS (PLS-DA or PLS Regression) ----------------
+        # ---------------- PLS (PLS-DA / Regression) ----------------
         with st.expander("PLS (PLS-DA / Regression)", expanded=False):
             if labels is None:
                 st.info("Select a label/response column in Metadata to enable PLS.")
             else:
                 y_raw = np.array(labels, dtype=object)
-
-                # components limited by features AND samples-1
-                max_lv = int(max(1, min(15, X.shape[1], X.shape[0] - 1)))
-                n_comp_pls = st.slider("PLS components", min_value=2, max_value=max_lv, value=min(5, max_lv), step=1)
                 scale_X = st.checkbox("Standardize X", value=True)
+
+                # Prepare X for PLS AFTER we know scale_X
+                rt_axis_full = np.asarray(model_df["RT(min)"].values, dtype=float)
+                X_pls, rt_axis_pls = sanitize_X_for_modeling(X, rt_axis_full)
+                if scale_X:
+                    X_pls = StandardScaler(with_mean=True, with_std=True).fit_transform(X_pls)
+
+                # components limited by features AND samples-1 (use sanitized X_pls)
+                max_lv = int(max(1, min(15, X_pls.shape[1], X_pls.shape[0] - 1)))
+                n_comp_pls = st.slider("PLS components", min_value=2, max_value=max_lv, value=min(5, max_lv), step=1)
 
                 y_num_try = pd.to_numeric(y_raw, errors="coerce")
                 is_numeric = np.isfinite(y_num_try).all()
-
-                X_pls = X.copy()
-                if scale_X:
-                    X_pls = StandardScaler(with_mean=True, with_std=True).fit_transform(X_pls)
 
                 # ---------- helpers ----------
                 def _r2x_from_scores_loadings(X_, T_, P_):
@@ -1247,7 +1351,6 @@ else:
                         y_hat = pls.predict(X_)
                         r2y = r2_score(y_, y_hat)
                         r2x = _r2x_from_scores_loadings(X_, T, P)
-                        # fresh CV each a
                         cv = KFold(n_splits=n_splits, shuffle=True, random_state=0)
                         press = sstot = 0.0
                         for tr, te in cv.split(X_):
@@ -1265,7 +1368,6 @@ else:
                     counts = np.bincount(y_enc_)
                     stratified = (len(counts) > 1 and counts.min() >= 2)
                     n_splits = max(2, min(5, int(counts.min() if stratified else len(y_enc_))))
-
                     for a in range(1, max_a + 1):
                         pls = PLSRegression(n_components=a).fit(X_, Y_)
                         T, P = pls.x_scores_[:, :a], pls.x_loadings_[:, :a]
@@ -1275,15 +1377,8 @@ else:
                         else:
                             r2y = float(np.mean([r2_score(Y_[:, j], Y_hat[:, j]) for j in range(Y_.shape[1])]))
                         r2x = _r2x_from_scores_loadings(X_, T, P)
-
-                        # fresh splitter each a
-                        if stratified:
-                            cv = StratifiedKFold(n_splits=n_splits, shuffle=True, random_state=0)
-                            splits = cv.split(X_, y_enc_)
-                        else:
-                            cv = KFold(n_splits=n_splits, shuffle=True, random_state=0)
-                            splits = cv.split(X_)
-
+                        splits = (StratifiedKFold(n_splits=n_splits, shuffle=True, random_state=0).split(X_, y_enc_)
+                                  if stratified else KFold(n_splits=n_splits, shuffle=True, random_state=0).split(X_))
                         press = sstot = 0.0
                         for tr, te in splits:
                             m = PLSRegression(n_components=a).fit(X_[tr], Y_[tr])
@@ -1291,7 +1386,6 @@ else:
                             press += np.sum((Y_[te] - Y_pred_te) ** 2)
                             Y_mean_tr = np.mean(Y_[tr], axis=0, keepdims=True)
                             sstot += np.sum((Y_[te] - Y_mean_tr) ** 2)
-
                         q2 = float(1.0 - (press / sstot)) if sstot > 0 else np.nan
                         r2x_list += [r2x]; r2y_list += [r2y]; q2_list += [q2]
                     return r2x_list, r2y_list, q2_list
@@ -1314,7 +1408,6 @@ else:
                     # PLS Regression
                     y = np.asarray(y_num_try, dtype=float).reshape(-1, 1)
                     r2x_list, r2y_list, q2_list = _per_component_metrics_regression(X_pls, y, n_comp_pls)
-
                     pls = PLSRegression(n_components=n_comp_pls).fit(X_pls, y)
                     T, P = pls.x_scores_, pls.x_loadings_
 
@@ -1329,9 +1422,11 @@ else:
                     fig_scores.update_layout(xaxis_title="t[1]", yaxis_title="t[2]")
                     st.plotly_chart(fig_scores, use_container_width=True)
 
-                    rt_axis = np.array([float(r) for r in model_df["RT(min)"].values])
-                    df_load = pd.DataFrame({"RT(min)": rt_axis, "p1": P[:, 0],
-                                            "p2": P[:, 1] if P.shape[1] > 1 else np.zeros(P.shape[0])})
+                    df_load = pd.DataFrame({
+                        "RT(min)": rt_axis_pls,
+                        "p1": P[:, 0],
+                        "p2": P[:, 1] if P.shape[1] > 1 else np.zeros(P.shape[0])
+                    })
                     fig_load = go.Figure()
                     fig_load.add_trace(go.Scatter(x=df_load["RT(min)"], y=df_load["p1"], mode="lines", name="p[1]"))
                     if P.shape[1] > 1:
@@ -1355,7 +1450,6 @@ else:
                         Y[np.arange(len(y_enc)), y_enc] = 1.0
 
                     r2x_list, r2y_list, q2_list = _per_component_metrics_plsda(X_pls, Y, y_enc, n_comp_pls)
-
                     pls = PLSRegression(n_components=n_comp_pls).fit(X_pls, Y)
                     T, P = pls.x_scores_, pls.x_loadings_
 
@@ -1370,9 +1464,11 @@ else:
                     fig_scores.update_layout(xaxis_title="t[1]", yaxis_title="t[2]")
                     st.plotly_chart(fig_scores, use_container_width=True)
 
-                    rt_axis = np.array([float(r) for r in model_df["RT(min)"].values])
-                    df_load = pd.DataFrame({"RT(min)": rt_axis, "p1": P[:, 0],
-                                            "p2": P[:, 1] if P.shape[1] > 1 else np.zeros(P.shape[0])})
+                    df_load = pd.DataFrame({
+                        "RT(min)": rt_axis_pls,
+                        "p1": P[:, 0],
+                        "p2": P[:, 1] if P.shape[1] > 1 else np.zeros(P.shape[0])
+                    })
                     fig_load = go.Figure()
                     fig_load.add_trace(go.Scatter(x=df_load["RT(min)"], y=df_load["p1"], mode="lines", name="p[1]"))
                     if P.shape[1] > 1:
@@ -1382,7 +1478,6 @@ else:
 
                     _plot_perf_bars(r2x_list, r2y_list, q2_list, "PLS-DA Performance per Component")
 
-# ------------------ More ------------------
 
 
 # ------------------ Export ------------------
@@ -1489,6 +1584,12 @@ else:
         if missing:
             with st.expander("Samples missing metadata (will be excluded)"):
                 show_df(pd.DataFrame({"missing_sample_id_after_sanitize": missing}))
+
+        included = sorted(list(samples_sanit & set(meta_ids_sanit)))
+        with st.expander("Samples included in export"):
+            show_df(pd.DataFrame({"sample_id_after_sanitize": included}))
+
+
 
         # Output filename
         default_name = f"metaboanalyst_input_{time.strftime('%Y%m%d_%H%M%S')}.csv"
