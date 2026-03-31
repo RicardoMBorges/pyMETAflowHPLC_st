@@ -147,39 +147,105 @@ mode = st.sidebar.radio(
 )
 
 # ------------------ Helpers ------------------
-HEADER_RE = re.compile(r"^R\.Time \(min\)\s+Intensity\s*$", flags=re.MULTILINE)
+HEADER_2D_RE = re.compile(r"^R\.Time \(min\)\s+Intensity\s*$", flags=re.MULTILINE)
+HEADER_3D_RE = re.compile(r"^\[PDA 3D\]\s*$", flags=re.MULTILINE)
 
 def parse_labsolutions_ascii(file_name: str, raw_bytes: bytes) -> pd.DataFrame:
-    """Return DF with columns: ['RT(min)', <sample_name>] parsed from LabSolutions ASCII .txt (2D)."""
+    """
+    Return DF with columns ['RT(min)', <sample_name>] from LabSolutions ASCII.
+    Supports:
+      - 2D ASCII: header 'R.Time (min)    Intensity'
+      - PDA 3D ASCII: section [PDA 3D] with wavelength columns
+    For 3D, this function extracts one wavelength trace automatically
+    (default: nearest to 254 nm).
+    """
     try:
         text = raw_bytes.decode("latin1", errors="ignore")
     except Exception:
         text = raw_bytes.decode("utf-8", errors="ignore")
-    m = HEADER_RE.search(text)
-    if not m:
-        raise ValueError("Could not find a header like 'R.Time (min)    Intensity' in the file.")
-    table = text[m.start():]
-    # accept tabs or multiple spaces between columns
-    df = pd.read_csv(io.StringIO(table), sep=r"\s+", engine="python")
-
-    df = df.iloc[:, :2].copy()
-    df.columns = ["RT(min)", "Intensity"]
-
-    # robust numeric parse (accept both 11.25 and 11,25)
-    df["RT(min)"] = pd.to_numeric(
-        df["RT(min)"].astype(str).str.replace(",", ".", regex=False),
-        errors="coerce"
-    )
-    df["Intensity"] = pd.to_numeric(
-        df["Intensity"].astype(str).str.replace(",", ".", regex=False),
-        errors="coerce"
-    )
-
-    # drop rows without valid RT
-    df = df[df["RT(min)"].notna()].reset_index(drop=True)
 
     base = os.path.splitext(os.path.basename(file_name))[0]
-    return df.rename(columns={"Intensity": base}).reset_index(drop=True)
+
+    # ---------- Case 1: classic 2D ----------
+    m2d = HEADER_2D_RE.search(text)
+    if m2d:
+        table = text[m2d.start():]
+        df = pd.read_csv(io.StringIO(table), sep=r"\s+", engine="python")
+        df = df.iloc[:, :2].copy()
+        df.columns = ["RT(min)", base]
+
+        df["RT(min)"] = pd.to_numeric(
+            df["RT(min)"].astype(str).str.replace(",", ".", regex=False),
+            errors="coerce"
+        )
+        df[base] = pd.to_numeric(
+            df[base].astype(str).str.replace(",", ".", regex=False),
+            errors="coerce"
+        )
+
+        df = df[df["RT(min)"].notna()].reset_index(drop=True)
+        return df
+
+    # ---------- Case 2: PDA 3D ----------
+    if HEADER_3D_RE.search(text):
+        lines = text.splitlines()
+
+        # find "R.Time (min)" line
+        rt_header_idx = None
+        for i, line in enumerate(lines):
+            if line.strip() == "R.Time (min)":
+                rt_header_idx = i
+                break
+
+        if rt_header_idx is None:
+            raise ValueError("Found PDA 3D block, but could not find 'R.Time (min)' header.")
+
+        # next line should contain wavelengths
+        if rt_header_idx + 1 >= len(lines):
+            raise ValueError("PDA 3D format incomplete: wavelength row missing.")
+
+        wl_line = lines[rt_header_idx + 1].strip()
+        wl_tokens = re.split(r"\s+", wl_line)
+        wl_tokens = [w for w in wl_tokens if w != ""]
+
+        wavelengths = pd.to_numeric(pd.Series(wl_tokens), errors="coerce").dropna().tolist()
+        if len(wavelengths) == 0:
+            raise ValueError("Could not parse wavelength axis from PDA 3D file.")
+
+        # choose target wavelength automatically
+        target_wl = 254
+        wl_idx = int(np.argmin(np.abs(np.array(wavelengths) - target_wl)))
+
+        data_rows = []
+        for line in lines[rt_header_idx + 2:]:
+            toks = re.split(r"\s+", line.strip())
+            if len(toks) < 2:
+                continue
+
+            rt_val = pd.to_numeric(str(toks[0]).replace(",", "."), errors="coerce")
+            if pd.isna(rt_val):
+                continue
+
+            numeric_vals = pd.to_numeric(
+                pd.Series([str(x).replace(",", ".") for x in toks[1:]]),
+                errors="coerce"
+            ).tolist()
+
+            if wl_idx < len(numeric_vals):
+                inten = numeric_vals[wl_idx]
+                data_rows.append([rt_val, inten])
+
+        if not data_rows:
+            raise ValueError("No valid RT/intensity pairs parsed from PDA 3D file.")
+
+        df = pd.DataFrame(data_rows, columns=["RT(min)", base])
+        df = df[df["RT(min)"].notna()].reset_index(drop=True)
+        return df
+
+    raise ValueError(
+        "Unrecognized LabSolutions ASCII format. Expected either 2D "
+        "('R.Time (min) Intensity') or PDA 3D ('[PDA 3D]')."
+    )
 
 def outer_join_rt(dfs: dict) -> pd.DataFrame:
     combined = None
