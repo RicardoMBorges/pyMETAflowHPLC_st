@@ -846,7 +846,7 @@ if align_source is not None:
     st.subheader("Alignment")
     st.markdown("**Icoshift:** Interval correlation optimized shifting (commonly used for chromatogram/NMR alignment).")
     st.markdown("**PAFFT / RAFFT:** FFT-based alignment approaches (phase or recursive). These correct RT drifts between chromatograms.")
-    sample_names = list(align_source.columns[1:])
+    sample_names = list(align_source.columns[0:])
     method, params = alignment_controls(align_source, sample_names=sample_names)
     df_aligned = align_df(align_source, method, **params)
     
