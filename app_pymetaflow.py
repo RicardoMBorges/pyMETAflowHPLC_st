@@ -367,6 +367,46 @@ pda_meta = st.session_state.get("pda_meta", None)
 def _import_3d_cached(folder: str, wl: float, outname: str):
     return dp.import_3D_data(folder, target_wavelength=wl, output_filename=outname)
 
+def parse_pda_3d_cube_from_bytes(file_name: str, raw_bytes: bytes) -> pd.DataFrame:
+    """
+    Returns a PDA cube as DataFrame:
+    rows = RT(min)
+    columns = wavelengths (nm)
+    values = absorbance/intensity
+    """
+    text = raw_bytes.decode("latin1", errors="ignore")
+    lines = text.splitlines()
+
+    rt_header_idx = None
+    for i, line in enumerate(lines):
+        if line.strip() == "R.Time (min)":
+            rt_header_idx = i
+            break
+
+    if rt_header_idx is None:
+        raise ValueError(f"No PDA 3D RT header found in {file_name}")
+
+    wl_tokens = re.split(r"\s+", lines[rt_header_idx + 1].strip())
+    wavelengths = pd.to_numeric(pd.Series(wl_tokens), errors="coerce").dropna().tolist()
+
+    rows = []
+    for line in lines[rt_header_idx + 2:]:
+        toks = re.split(r"\s+", line.strip())
+        if len(toks) < 2:
+            continue
+
+        rt = pd.to_numeric(str(toks[0]).replace(",", "."), errors="coerce")
+        vals = pd.to_numeric(
+            pd.Series([str(x).replace(",", ".") for x in toks[1:]]),
+            errors="coerce"
+        ).tolist()
+
+        if pd.notna(rt) and len(vals) >= len(wavelengths):
+            rows.append([float(rt)] + vals[:len(wavelengths)])
+
+    cube = pd.DataFrame(rows, columns=["RT(min)"] + wavelengths)
+    return cube
+
 if mode == "2D LabSolutions ASCII (uploads)":
     uploads_2d = st.sidebar.file_uploader(
         "ASCII export(s) with 'R.Time (min)\\tIntensity' header",
@@ -423,6 +463,18 @@ elif mode == "3D PDA (folder of .txt)":
                 if combined is not None and not combined.empty:
                     st.session_state["combined"] = combined
 
+                pda_cubes = {}
+                for txt_file in Path(input_folder).glob("*.txt"):
+                    try:
+                        pda_cubes[txt_file.stem] = parse_pda_3d_cube_from_bytes(
+                            txt_file.name,
+                            txt_file.read_bytes()
+                        )
+                    except Exception as e:
+                        st.warning(f"Could not parse UV spectra from {txt_file.name}: {e}")
+
+                st.session_state["pda_cubes"] = pda_cubes
+
                 st.success(f"Built & cached matrix from {combined_3d.shape[1]-1} files at ≈{wl_pick} nm")
         else:
             st.error("Please enter a valid existing folder path.")
@@ -449,6 +501,7 @@ elif mode == "3D PDA (uploaded .txt)":
     if do_clear:
         st.session_state.pop("pda_df", None)
         st.session_state.pop("pda_meta", None)
+        st.session_state.pop("pda_cubes", None)
         st.success("Cleared PDA matrix from memory.")
 
     if uploads_pda and do_extract:
@@ -474,6 +527,19 @@ elif mode == "3D PDA (uploaded .txt)":
                 
                 if combined is not None and not combined.empty:
                     st.session_state["combined"] = combined
+
+                pda_cubes = {}
+                for f in uploads_pda:
+                    try:
+                        stem = os.path.splitext(os.path.basename(f.name))[0]
+                        pda_cubes[stem] = parse_pda_3d_cube_from_bytes(
+                            f.name,
+                            f.getvalue()
+                        )
+                    except Exception as e:
+                        st.warning(f"Could not parse UV spectra from {f.name}: {e}")
+
+                st.session_state["pda_cubes"] = pda_cubes
 
                 st.success(f"Built & cached matrix from {combined_3d.shape[1]-1} uploads at ≈{wl_pick_up} nm")
         finally:
@@ -844,8 +910,13 @@ if align_source is None:
 
 if align_source is not None:
     st.subheader("Alignment")
-    st.markdown("**Icoshift:** Interval correlation optimized shifting (commonly used for chromatogram/NMR alignment).")
-    st.markdown("**PAFFT / RAFFT:** FFT-based alignment approaches (phase or recursive). These correct RT drifts between chromatograms.")
+    with st.expander("Alignment methods"):
+        st.markdown("""
+        **PAFFT** — FFT-based chromatographic alignment AND          
+        **RAFFT** — Recursive FFT alignment: FFT-based alignment approaches (phase or recursive). These correct RT drifts between chromatograms.
+
+        **Icoshift** — Interval correlation optimized shifting: Interval correlation optimized shifting (commonly used for chromatogram/NMR alignment).
+        """)
     sample_names = list(align_source.columns[0:])
     method, params = alignment_controls(align_source, sample_names=sample_names)
     df_aligned = align_df(align_source, method, **params)
@@ -1191,7 +1262,15 @@ if df_aligned is not None:
     st.subheader("Visualizations")
     plot_df = df_aligned.melt(id_vars="RT(min)", var_name="Sample", value_name="Intensity").dropna(subset=["Intensity"])
 
-    t1, t2, t3 = st.tabs(["Overlay", "Stacked", "Heatmap"])
+    is_3d_pda_mode = mode in ["3D PDA (folder of .txt)", "3D PDA (uploaded .txt)"]
+    has_pda_cubes = bool(st.session_state.get("pda_cubes"))
+
+    tab_names = ["Overlay", "Stacked", "Heatmap"]
+    if is_3d_pda_mode and has_pda_cubes:
+        tab_names.append("UV spectrum")
+
+    tabs = st.tabs(tab_names)
+    t1, t2, t3 = tabs[0], tabs[1], tabs[2]
     with t1:
         fig = px.line(plot_df, x="RT(min)", y="Intensity", color="Sample", title="Overlay chromatograms")
         fig.update_layout(xaxis_title="RT (min)", yaxis_title="Intensity", legend_title="Sample")
@@ -1221,6 +1300,80 @@ if df_aligned is not None:
         fig3.update_layout(title="Intensity heatmap", xaxis_title="RT (min)", yaxis_title="Sample", coloraxis_colorscale="Viridis")
         st.plotly_chart(fig3, use_container_width=True)
 
+        if is_3d_pda_mode and has_pda_cubes:
+            with tabs[3]:
+                st.markdown("### UV spectrum at selected retention time")
+
+                pda_cubes = st.session_state["pda_cubes"]
+
+                sample_name = st.selectbox(
+                    "Select DAD/PDA sample",
+                    options=list(pda_cubes.keys())
+                )
+
+                cube = pda_cubes[sample_name]
+                rt_values = cube["RT(min)"].astype(float)
+
+                selected_rt = st.number_input(
+                    "Peak retention time (min)",
+                    min_value=float(rt_values.min()),
+                    max_value=float(rt_values.max()),
+                    value=float(rt_values.median()),
+                    step=0.01,
+                    format="%.3f"
+                )
+
+                nearest_idx = (rt_values - selected_rt).abs().idxmin()
+                nearest_rt = float(cube.loc[nearest_idx, "RT(min)"])
+
+                spectrum = cube.drop(columns=["RT(min)"]).loc[nearest_idx]
+                spectrum = pd.to_numeric(spectrum, errors="coerce")
+
+                normalize_uv = st.checkbox("Normalize UV spectrum to max = 1", value=False)
+
+                divide_wavelength_by_100 = st.checkbox(
+                    "Divide wavelength axis by 100",
+                    value=False,
+                    help="Use this when the PDA/DAD file stores wavelengths as 18895, 19015, 19135... instead of 188.95, 190.15, 191.35 nm."
+                )
+
+                x_wavelengths = np.array([float(w) for w in spectrum.index], dtype=float)
+
+                if divide_wavelength_by_100:
+                    x_wavelengths = x_wavelengths / 100
+
+                clip_uv_range = st.checkbox(
+                    "Show only 200–400 nm",
+                    value=True,
+                    help="Restrict UV spectrum display to the most commonly used UV range."
+                )
+
+                y = spectrum.values.astype(float)
+
+                if clip_uv_range:
+                    mask = (x_wavelengths >= 200) & (x_wavelengths <= 400)
+                    x_wavelengths = x_wavelengths[mask]
+                    y = y[mask]
+                if normalize_uv and np.nanmax(np.abs(y)) > 0:
+                    y = y / np.nanmax(np.abs(y))
+
+                fig_uv = go.Figure()
+                fig_uv.add_trace(
+                    go.Scatter(
+                        x=x_wavelengths,
+                        y=y,
+                        mode="lines",
+                        name=f"{sample_name} | RT {nearest_rt:.3f} min"
+                    )
+                )
+
+                fig_uv.update_layout(
+                    title=f"UV spectrum at RT = {nearest_rt:.3f} min",
+                    xaxis_title="Wavelength (nm)",
+                    yaxis_title="Intensity" if not normalize_uv else "Normalized intensity"
+                )
+
+                st.plotly_chart(fig_uv, use_container_width=True)
 
 # ------------------ Modeling (PCA / PLS) ------------------
 # prefer aligned, else preprocessed grid, else raw combined
