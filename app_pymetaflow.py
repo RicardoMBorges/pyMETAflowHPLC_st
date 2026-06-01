@@ -1235,14 +1235,68 @@ if df_aligned is not None:
         st.markdown("**Top associations (by |Correlation|):**")
         show_df(top)
 
-        figc = px.scatter(
-            res, x="RT(min)", y="Covariance",
-            color="Correlation", color_continuous_scale="Jet",
-            render_mode="webgl",
-            title=f"STOCSY from {target_for_run:.2f} min — Covariance colored by Correlation"
+        # Remove the artificial BioAct point from the visual plot
+        res_plot = res.copy()
+        if use_bio_driver:
+            res_plot = res_plot.iloc[:-1].copy()
+
+        # Optional Y-axis display scaling only for visualization
+        stocsy_y_mode = st.selectbox(
+            "STOCSY Y-axis display",
+            [
+                "Covariance",
+                "Abs covariance",
+                "Scaled covariance max=1",
+                "Correlation only"
+            ],
+            index=2,
+            help="This changes only the plot display, not the STOCSY calculation."
         )
+
+        if stocsy_y_mode == "Covariance":
+            res_plot["Y_plot"] = res_plot["Covariance"]
+            y_title = "Covariance"
+
+        elif stocsy_y_mode == "Abs covariance":
+            res_plot["Y_plot"] = res_plot["Covariance"].abs()
+            y_title = "|Covariance|"
+
+        elif stocsy_y_mode == "Scaled covariance max=1":
+            max_cov = res_plot["Covariance"].abs().max()
+            res_plot["Y_plot"] = res_plot["Covariance"] / max_cov if max_cov > 0 else res_plot["Covariance"]
+            y_title = "Scaled covariance"
+
+        else:
+            res_plot["Y_plot"] = res_plot["Correlation"]
+            y_title = "Correlation"
+
+        figc = px.scatter(
+            res_plot,
+            x="RT(min)",
+            y="Y_plot",
+            color="Correlation",
+            color_continuous_scale="Jet",
+            render_mode="webgl",
+            title=f"STOCSY from BioAct — {y_title} colored by correlation"
+        )
+
         figc.update_traces(marker=dict(size=5))
-        figc.add_trace(go.Scatter(x=res["RT(min)"], y=res["Covariance"], mode="lines", line=dict(width=1), name="Covariance"))
+
+        figc.add_trace(
+            go.Scatter(
+                x=res_plot["RT(min)"],
+                y=res_plot["Y_plot"],
+                mode="lines",
+                line=dict(width=1),
+                name=y_title
+            )
+        )
+
+        figc.update_layout(
+            xaxis_title="RT(min)",
+            yaxis_title=y_title
+        )
+
         st.plotly_chart(figc, use_container_width=True)
 
         figr = px.line(res, x="RT(min)", y="Correlation", title="Correlation vs RT(min)")
