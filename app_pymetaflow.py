@@ -1293,10 +1293,64 @@ if df_aligned is not None:
             corr, covar = stocsy_linear(target_for_run, Xmat, rt_vals)
 
         res = pd.DataFrame({"RT(min)": rt_vals.values, "Correlation": corr, "Covariance": covar})
-        topn = st.slider("Show top-N by |Correlation|", min_value=5, max_value=200, value=5, step=5)
-        top = res.reindex(res["Correlation"].abs().sort_values(ascending=False).index).head(topn)
-        st.markdown("**Top associations (by |Correlation|):**")
-        show_df(top)
+
+        # Rank STOCSY associations by correlation direction.
+        # This is especially useful for inverse biological responses such as IC50,
+        # where stronger activity (lower IC50) is expected to correlate negatively
+        # with chromatographic signals associated with active constituents.
+        rank_mode = st.radio(
+            "Rank top associations by",
+            options=[
+                "Top negative correlations",
+                "Top positive correlations",
+                "Top by |Correlation|",
+            ],
+            index=0 if use_bio_driver else 2,
+            horizontal=True,
+            help=(
+                "Negative: most negative r first (useful for IC50 and other inverse responses). "
+                "Positive: most positive r first. Absolute: strongest associations regardless of direction."
+            ),
+            key="stocsy_rank_mode",
+        )
+
+        topn = st.slider(
+            "Number of top associations",
+            min_value=5,
+            max_value=200,
+            value=5,
+            step=5,
+            key="stocsy_topn",
+        )
+
+        # Do not allow the artificial BioActivity driver point itself to appear
+        # among the ranked chromatographic associations.
+        res_rank = res.iloc[:-1].copy() if use_bio_driver else res.copy()
+        res_rank = res_rank.replace([np.inf, -np.inf], np.nan).dropna(subset=["Correlation"])
+
+        if rank_mode == "Top negative correlations":
+            top = res_rank[res_rank["Correlation"] < 0].sort_values(
+                "Correlation", ascending=True
+            ).head(topn)
+            table_title = "Top negative associations"
+
+        elif rank_mode == "Top positive correlations":
+            top = res_rank[res_rank["Correlation"] > 0].sort_values(
+                "Correlation", ascending=False
+            ).head(topn)
+            table_title = "Top positive associations"
+
+        else:
+            top = res_rank.reindex(
+                res_rank["Correlation"].abs().sort_values(ascending=False).index
+            ).head(topn)
+            table_title = "Top associations by |Correlation|"
+
+        st.markdown(f"**{table_title}:**")
+        if top.empty:
+            st.info("No associations were found for the selected correlation direction.")
+        else:
+            show_df(top)
 
         # Remove the artificial BioAct point from the visual plot
         res_plot = res.copy()
