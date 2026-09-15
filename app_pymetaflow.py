@@ -1345,7 +1345,21 @@ if df_aligned is not None:
                    f"STOCSY — {y_title} colored by correlation")
         )
 
-        figc.update_traces(marker=dict(size=5))
+        # STOCSY point hover: expose RT, displayed covariance/value, and correlation
+        figc.update_traces(
+            marker=dict(size=5),
+            customdata=np.column_stack((
+                res_plot["Correlation"].to_numpy(dtype=float),
+                res_plot["Covariance"].to_numpy(dtype=float),
+            )),
+            hovertemplate=(
+                "<b>RT:</b> %{x:.3f} min<br>"
+                f"<b>{y_title}:</b> %{{y:.4f}}<br>"
+                "<b>Correlation:</b> %{customdata[0]:.4f}<br>"
+                "<b>Raw covariance:</b> %{customdata[1]:.4f}"
+                "<extra></extra>"
+            )
+        )
 
         figc.add_trace(
             go.Scatter(
