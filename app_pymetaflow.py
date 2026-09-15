@@ -1136,6 +1136,7 @@ if df_aligned is not None:
     use_bio_driver = st.checkbox("Use BioActivity fusion and drive STOCSY with BioAct", value=False)
     MergeDF = None
     new_axis = None
+    selected_activity = None
     if use_bio_driver:
         if bio_df is None:
             st.error("BioActivity CSV not loaded. Upload it in the sidebar.")
@@ -1181,15 +1182,77 @@ if df_aligned is not None:
                     else:
                         LC_ord = LC[samples_ok].copy()
 
-                        # Choose a numeric row from bio_df_tmp across required cols
+                        # Select which BioActivity response/assay will drive STOCSY.
+                        # Any column not mapped to sample BioAct columns is treated as a
+                        # possible descriptor column (e.g. filename = SCC9-IC50).
+                        descriptor_cols = [
+                            c for c in bio_df_tmp.columns
+                            if str(c).replace(".txt", "") not in bio_cols_needed
+                        ]
+
                         picked = None
-                        for r in range(bio_df_tmp.shape[0]):
-                            vals = pd.to_numeric(bio_df_tmp[bio_cols_needed].iloc[r], errors="coerce")
-                            if vals.notna().mean() > 0.8:
-                                picked = vals.values.astype(float)
-                                break
+                        selected_activity = None
+
+                        if descriptor_cols:
+                            bio_label_col = st.selectbox(
+                                "BioActivity descriptor column",
+                                options=descriptor_cols,
+                                index=0,
+                                help="Column containing the names of the biological assays/responses."
+                            )
+
+                            activity_labels = (
+                                bio_df_tmp[bio_label_col]
+                                .fillna("")
+                                .astype(str)
+                                .tolist()
+                            )
+                            # Keep order while removing duplicate/blank labels.
+                            activity_labels = list(dict.fromkeys([x for x in activity_labels if x.strip()]))
+
+                            if activity_labels:
+                                selected_activity = st.selectbox(
+                                    "BioActivity response for STOCSY",
+                                    options=activity_labels,
+                                    index=0,
+                                    help="Select the biological response that will be used as the STOCSY driver.",
+                                    key="stocsy_bioactivity_response"
+                                )
+
+                                selected_rows = bio_df_tmp[
+                                    bio_df_tmp[bio_label_col].astype(str) == str(selected_activity)
+                                ]
+                                if not selected_rows.empty:
+                                    picked_series = pd.to_numeric(
+                                        selected_rows.iloc[0][bio_cols_needed],
+                                        errors="coerce"
+                                    )
+                                    picked = picked_series.values.astype(float)
+                            else:
+                                st.warning("No non-empty BioActivity response names were found in the descriptor column.")
+
+                        # Fallback for BioActivity files without a usable descriptor column.
                         if picked is None:
-                            picked = pd.to_numeric(bio_df_tmp[bio_cols_needed].iloc[0], errors="coerce").values.astype(float)
+                            st.warning(
+                                "No selectable BioActivity response was detected. "
+                                "Using the first sufficiently numeric row."
+                            )
+                            for r in range(bio_df_tmp.shape[0]):
+                                vals = pd.to_numeric(bio_df_tmp[bio_cols_needed].iloc[r], errors="coerce")
+                                if vals.notna().mean() > 0.8:
+                                    picked = vals.values.astype(float)
+                                    selected_activity = f"row_{r + 1}"
+                                    break
+
+                        if picked is None:
+                            st.error("Could not obtain numeric BioActivity values for the selected samples.")
+                        else:
+                            st.caption(f"STOCSY BioActivity driver: **{selected_activity}**")
+                            with st.expander("BioActivity values used in STOCSY"):
+                                show_df(pd.DataFrame({
+                                    "Sample": samples_ok,
+                                    "BioActivity": picked
+                                }))
 
                         BioActdata = pd.DataFrame([picked], columns=bio_cols_needed)
                         BioActdata.rename(columns={i: j for i, j in zip(bio_cols_needed, samples_ok)}, inplace=True)
@@ -1277,7 +1340,9 @@ if df_aligned is not None:
             color="Correlation",
             color_continuous_scale="Jet",
             render_mode="webgl",
-            title=f"STOCSY from BioAct — {y_title} colored by correlation"
+            title=(f"STOCSY — BioActivity driver: {selected_activity} — {y_title} colored by correlation"
+                   if use_bio_driver and selected_activity else
+                   f"STOCSY — {y_title} colored by correlation")
         )
 
         figc.update_traces(marker=dict(size=5))
@@ -1306,7 +1371,11 @@ if df_aligned is not None:
         st.download_button(
             "⬇️ Download STOCSY table (CSV)",
             data=csv_bytes,
-            file_name=f"stocsy_{target_for_run:.2f}min_{stocsy_model}.csv",
+            file_name=(
+                f"stocsy_{re.sub(r'[^A-Za-z0-9_.-]+', '_', str(selected_activity))}_{stocsy_model}.csv"
+                if use_bio_driver and selected_activity else
+                f"stocsy_{target_for_run:.2f}min_{stocsy_model}.csv"
+            ),
             mime="text/csv"
         )
 
