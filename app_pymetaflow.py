@@ -273,6 +273,13 @@ def resample_to_grid(df: pd.DataFrame, step: float, rt_min=None, rt_max=None):
     if df is None or not isinstance(df, pd.DataFrame) or df.empty or "RT(min)" not in df.columns:
         return None, None
 
+    if not df.columns.is_unique:
+        duplicates = df.columns[df.columns.duplicated(keep=False)].unique().tolist()
+        raise ValueError(
+            "Chromatogram column names must be unique. Check the metadata Sample ID "
+            f"mapping. Repeated names: {duplicates}"
+        )
+
     # coerce to numeric just in case upstream missed something
     x = pd.to_numeric(df["RT(min)"], errors="coerce").values
     if x.size == 0 or np.all(np.isnan(x)):
@@ -616,14 +623,37 @@ else:
 if combined is not None:
     file_stems = [c for c in combined.columns if c != "RT(min)"]
     if meta_df is not None and col_sample and col_hplc:
+        # Validate identity before renaming: repeated IDs make df[column] a DataFrame
+        # and also make chromatogram/bioactivity matching ambiguous.
+        sample_ids = meta_df[col_sample].astype("string").str.strip()
+        hplc_stems = meta_df[col_hplc].astype("string").str.strip().str.replace(
+            r"(?i)\.txt$", "", regex=True
+        )
+        invalid = (
+            sample_ids.isna() | sample_ids.eq("")
+            | hplc_stems.isna() | hplc_stems.eq("")
+            | sample_ids.duplicated(keep=False)
+            | hplc_stems.duplicated(keep=False)
+        )
+        if invalid.any():
+            st.error(
+                "Metadata mapping is ambiguous: Sample IDs and HPLC file stems must "
+                "be non-empty and unique. Correct the rows below and upload the "
+                "metadata again. No chromatograms have been combined or discarded."
+            )
+            show_df(meta_df.loc[invalid, list(dict.fromkeys([col_sample, col_hplc]))])
+            st.stop()
         name_map = {}
         for _, row in meta_df.iterrows():
-            stem = str(row[col_hplc]).replace(".txt", "")
-            name_map[stem] = str(row[col_sample])
+            stem = re.sub(r"(?i)\.txt$", "", str(row[col_hplc]).strip())
+            name_map[stem] = str(row[col_sample]).strip()
         ren = {stem: name_map[stem] for stem in file_stems if stem in name_map}
         if ren:
             combined = combined.rename(columns=ren)
-            st.session_state["combined"] = combined
+            if not combined.columns.is_unique:
+                st.error("Metadata renaming produced repeated chromatogram names. Use unique Sample IDs.")
+                st.stop()
+            # Keep the cached source matrix in its original file-stem names.
 
 
 # ------------------ Preprocessing controls ------------------
