@@ -1173,6 +1173,24 @@ if df_aligned is not None:
     st.markdown("---")
     st.subheader("STOCSY")
 
+    available_stocsy_samples = [c for c in df_aligned.columns if c != "RT(min)"]
+    excluded_stocsy_samples = st.multiselect(
+        "Exclude samples from STOCSY",
+        options=available_stocsy_samples,
+        default=[],
+        help="Excluded samples are removed from both chromatograms and BioActivity "
+             "for STOCSY. Other analyses are unchanged.",
+        key="stocsy_excluded_samples",
+    )
+    included_stocsy_samples = [
+        c for c in available_stocsy_samples if c not in excluded_stocsy_samples
+    ]
+    stocsy_input = df_aligned.loc[:, ["RT(min)"] + included_stocsy_samples].copy()
+    st.caption(
+        f"STOCSY: {len(included_stocsy_samples)} of "
+        f"{len(available_stocsy_samples)} samples selected."
+    )
+
     # --- STOCSY controls (rename `mode` → `stocsy_model`) ---
     cols = st.columns([2, 1, 1])
     with cols[0]:
@@ -1200,7 +1218,7 @@ if df_aligned is not None:
             # Ensure expected mapping columns exist
             if 'col_sample' in locals() and 'col_hplc' in locals() and col_sample and col_hplc:
                 try:
-                    normalized_df = df_aligned.copy()
+                    normalized_df = stocsy_input.copy()
                     LC = normalized_df.drop(columns="RT(min)")
                     RT = normalized_df["RT(min)"]
 
@@ -1241,7 +1259,7 @@ if df_aligned is not None:
                         # possible descriptor column (e.g. filename = SCC9-IC50).
                         descriptor_cols = [
                             c for c in bio_df_tmp.columns
-                            if str(c).replace(".txt", "") not in bio_cols_needed
+                            if str(c).replace(".txt", "") not in ordered_bio
                         ]
 
                         picked = None
@@ -1325,15 +1343,25 @@ if df_aligned is not None:
                 st.error("Select valid 'Sample ID' and 'HPLC file stems' columns in metadata.")
 
     if run_btn:
+        if len(included_stocsy_samples) < 3:
+            st.error("Select at least 3 samples to calculate STOCSY correlations.")
+            st.stop()
+        if use_bio_driver and (MergeDF is None or new_axis is None):
+            st.error("Resolve BioActivity fusion before running STOCSY.")
+            st.stop()
         # Choose data & axis
         if use_bio_driver and (MergeDF is not None) and (new_axis is not None):
             Xmat = MergeDF
             rt_vals = new_axis
             target_for_run = float(new_axis.values[-1])
         else:
-            Xmat = df_aligned.drop(columns="RT(min)")
-            rt_vals = df_aligned["RT(min)"]
+            Xmat = stocsy_input.drop(columns="RT(min)")
+            rt_vals = stocsy_input["RT(min)"]
             target_for_run = float(target_rt)
+
+        if Xmat.shape[1] < 3:
+            st.error("At least 3 matched samples are required after BioActivity fusion.")
+            st.stop()
 
         corr = covar = None
         # Prefer user's dp implementation if available
