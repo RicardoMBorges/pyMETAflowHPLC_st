@@ -1119,6 +1119,30 @@ else:
 
 
 # ------------------ STOCSY (Structured correlation) ------------------
+def stocsy_html_export(fig_covariance, fig_correlation):
+    """Build an offline HTML report with both interactive STOCSY plots."""
+    config = {"scrollZoom": True, "displaylogo": False, "responsive": True}
+    panels = []
+    for i, figure in enumerate((fig_covariance, fig_correlation)):
+        panels.append(figure.to_html(
+            full_html=False,
+            include_plotlyjs=True if i == 0 else False,
+            config=config,
+            default_height="650px",
+        ))
+    return (
+        '<!DOCTYPE html><html lang="en"><head><meta charset="utf-8">'
+        '<meta name="viewport" content="width=device-width, initial-scale=1">'
+        '<title>STOCSY interactive results</title>'
+        '<style>body{font-family:Arial,sans-serif;margin:24px;background:#fff;'
+        'color:#222}p{line-height:1.5}</style></head><body>'
+        '<h1>STOCSY interactive results</h1>'
+        '<p>Hover over points for values. Drag to zoom; use the mouse wheel '
+        'to zoom or the toolbar to pan. Double-click to reset the axes. '
+        'The toolbar also exports each plot as PNG.</p>'
+        + "".join(panels) + '</body></html>'
+    ).encode("utf-8")
+
 def stocsy_linear(target_rt: float, X: pd.DataFrame, rt_values: pd.Series):
     """
     Minimal STOCSY (linear): correlate each row in X with the target row chosen by RT.
@@ -1464,6 +1488,21 @@ if df_aligned is not None:
 
         figr = px.line(res, x="RT(min)", y="Correlation", title="Correlation vs RT(min)")
         st.plotly_chart(figr, use_container_width=True)
+
+        html_stem = (
+            f"stocsy_{re.sub(r'[^A-Za-z0-9_.-]+', '_', str(selected_activity))}_{stocsy_model}"
+            if use_bio_driver and selected_activity else
+            f"stocsy_{target_for_run:.2f}min_{stocsy_model}"
+        )
+        st.download_button(
+            "⬇️ Download interactive STOCSY (HTML)",
+            data=stocsy_html_export(figc, figr),
+            file_name=f"{html_stem}.html",
+            mime="text/html",
+            help="Both STOCSY plots with zoom and hover. Open in a browser; works offline.",
+            key="download_stocsy_html",
+            on_click="ignore",
+        )
 
         csv_bytes = res.to_csv(index=False).encode("utf-8")
         st.download_button(
