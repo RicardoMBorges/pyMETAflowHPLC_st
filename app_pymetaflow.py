@@ -1191,6 +1191,15 @@ if df_aligned is not None:
         f"{len(available_stocsy_samples)} samples selected."
     )
 
+    stocsy_abs_threshold = st.slider(
+        "Minimum absolute correlation |r|",
+        min_value=0.0, max_value=1.0, value=0.5, step=0.05,
+        help="Keep both signs: |r| ≥ threshold. For example, 0.7 keeps r ≤ -0.7 "
+             "and r ≥ 0.7. Set before clicking Run STOCSY. This filters results, "
+             "without changing the correlation calculation.",
+        key="stocsy_abs_threshold",
+    )
+
     # --- STOCSY controls (rename `mode` → `stocsy_model`) ---
     cols = st.columns([2, 1, 1])
     with cols[0]:
@@ -1376,24 +1385,9 @@ if df_aligned is not None:
 
         res = pd.DataFrame({"RT(min)": rt_vals.values, "Correlation": corr, "Covariance": covar})
 
-        # Rank STOCSY associations by correlation direction.
-        # This is especially useful for inverse biological responses such as IC50,
-        # where stronger activity (lower IC50) is expected to correlate negatively
-        # with chromatographic signals associated with active constituents.
-        rank_mode = st.radio(
-            "Rank top associations by",
-            options=[
-                "Top negative correlations",
-                "Top positive correlations",
-                "Top by |Correlation|",
-            ],
-            index=0 if use_bio_driver else 2,
-            horizontal=True,
-            help=(
-                "Negative: most negative r first (useful for IC50 and other inverse responses). "
-                "Positive: most positive r first. Absolute: strongest associations regardless of direction."
-            ),
-            key="stocsy_rank_mode",
+        res["Pass_abs_threshold"] = (
+            np.isfinite(res["Correlation"]) &
+            (res["Correlation"].abs() >= stocsy_abs_threshold)
         )
 
         topn = st.slider(
@@ -1410,27 +1404,16 @@ if df_aligned is not None:
         res_rank = res.iloc[:-1].copy() if use_bio_driver else res.copy()
         res_rank = res_rank.replace([np.inf, -np.inf], np.nan).dropna(subset=["Correlation"])
 
-        if rank_mode == "Top negative correlations":
-            top = res_rank[res_rank["Correlation"] < 0].sort_values(
-                "Correlation", ascending=True
-            ).head(topn)
-            table_title = "Top negative associations"
-
-        elif rank_mode == "Top positive correlations":
-            top = res_rank[res_rank["Correlation"] > 0].sort_values(
-                "Correlation", ascending=False
-            ).head(topn)
-            table_title = "Top positive associations"
-
-        else:
-            top = res_rank.reindex(
-                res_rank["Correlation"].abs().sort_values(ascending=False).index
-            ).head(topn)
-            table_title = "Top associations by |Correlation|"
+        res_rank = res_rank.loc[res_rank["Pass_abs_threshold"]].copy()
+        top = res_rank.reindex(
+            res_rank["Correlation"].abs().sort_values(ascending=False).index
+        ).head(topn)
+        table_title = f"Top associations with |r| ≥ {stocsy_abs_threshold:.2f}"
+        st.caption(f"{len(res_rank)} chromatographic points pass the absolute correlation threshold.")
 
         st.markdown(f"**{table_title}:**")
         if top.empty:
-            st.info("No associations were found for the selected correlation direction.")
+            st.info("No associations pass the absolute correlation threshold.")
         else:
             show_df(top)
 
@@ -1483,7 +1466,10 @@ if df_aligned is not None:
 
         # STOCSY point hover: expose RT, displayed covariance/value, and correlation
         figc.update_traces(
-            marker=dict(size=5),
+            marker=dict(
+                size=5,
+                opacity=np.where(res_plot["Pass_abs_threshold"], 1.0, 0.12),
+            ),
             customdata=np.column_stack((
                 res_plot["Correlation"].to_numpy(dtype=float),
                 res_plot["Covariance"].to_numpy(dtype=float),
@@ -1502,7 +1488,8 @@ if df_aligned is not None:
                 x=res_plot["RT(min)"],
                 y=res_plot["Y_plot"],
                 mode="lines",
-                line=dict(width=1),
+                line=dict(width=1, color="lightgray"),
+                hoverinfo="skip",
                 name=y_title
             )
         )
@@ -1512,9 +1499,15 @@ if df_aligned is not None:
             yaxis_title=y_title
         )
 
+        figc.add_annotation(
+            text=f"Highlight: |r| ≥ {stocsy_abs_threshold:.2f}",
+            xref="paper", yref="paper", x=0, y=1.08, showarrow=False,
+        )
         st.plotly_chart(figc, use_container_width=True)
 
-        figr = px.line(res, x="RT(min)", y="Correlation", title="Correlation vs RT(min)")
+        figr = px.line(res_plot, x="RT(min)", y="Correlation", title="Correlation vs RT(min)")
+        for threshold_line in sorted({-stocsy_abs_threshold, stocsy_abs_threshold}):
+            figr.add_hline(y=threshold_line, line_dash="dash", line_color="gray")
         st.plotly_chart(figr, use_container_width=True)
 
         html_stem = (
