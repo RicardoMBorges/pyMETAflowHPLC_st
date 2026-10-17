@@ -1556,6 +1556,19 @@ if df_aligned is not None:
         fig = px.line(plot_df, x="RT(min)", y="Intensity", color="Sample", title="Overlay chromatograms")
         fig.update_layout(xaxis_title="RT (min)", yaxis_title="Intensity", legend_title="Sample")
         st.plotly_chart(fig, use_container_width=True)
+        st.download_button(
+            "⬇️ Download overlay chromatograms (HTML)",
+            data=fig.to_html(
+                full_html=True,
+                include_plotlyjs=True,
+                config={"scrollZoom": True, "displaylogo": False, "responsive": True},
+            ).encode("utf-8"),
+            file_name="overlay_chromatograms.html",
+            mime="text/html",
+            help="Interactive overlay with zoom, hover and sample selection via the legend. Works offline.",
+            key="download_overlay_html",
+            on_click="ignore",
+        )
     with t2:
         samples_sorted = sorted([c for c in df_aligned.columns if c != "RT(min)"])
         step = st.number_input("Stack offset", value=2.0, step=0.5)
